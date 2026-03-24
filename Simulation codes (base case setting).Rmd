@@ -1,0 +1,4014 @@
+---
+title: "Surrogacy and follow-up paper analyses Clarke"
+author: "Mario Ouwens"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 4
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(survival)
+library(flexsurv)
+library(ggplot2)
+library(doMC)
+library(doRNG)
+library("wCorr")
+
+#for parallel programming
+library(doMC)
+library(doRNG)
+
+registerDoMC(10)
+
+n.cores <- 10
+my.cluster <- parallel::makeCluster(
+  n.cores, 
+  type = "PSOCK"
+  )
+print(my.cluster)
+
+#register it to be used by %dopar%
+doParallel::registerDoParallel(cl = my.cluster)
+foreach::getDoParRegistered()
+
+#how many workers are available?
+#foreach::getDoParWorkers()
+
+```
+
+
+#HbA1c
+
+Data extracted from Clarke et al 2004
+```{r HbA1c, include=FALSE}
+Time	<- c(
+0.167419937	,
+0.397667099	,
+0.627675601	,
+0.77415313	,
+0.962157486	,
+1.213108396	,
+2.885517817	,
+1.902895243	,
+2.383854656	,
+3.303888665	,
+3.617070151	,
+4.076609836	,
+4.452976537	,
+5.05899375	,
+5.601587088	,
+6.039707045	,
+6.394773348	,
+6.74972032	,
+7.104905953	,
+7.501499083	,
+7.897972882	,
+8.294327352	,
+8.691039811	,
+8.941155412	,
+9.316925464	,
+9.734103012	,
+9.963634194	,
+10.27621903	,
+10.5262153	,
+10.73456542	,
+10.9427962	,
+11.1929118	,
+11.48467356	,
+11.67231992	,
+11.85972763	,
+11.96408168	)
+
+Cum_death	 = c(
+0.000569801	,
+0.001139601	,
+0.002849003	,
+0.003418803	,
+0.005698006	,
+0.007407407	,
+0.021652422	,
+0.013675214	,
+0.017094017	,
+0.023931624	,
+0.028490028	,
+0.034188034	,
+0.037037037	,
+0.043304843	,
+0.052421652	,
+0.06039886	,
+0.064957265	,
+0.07008547	,
+0.074074074	,
+0.08034188	,
+0.087179487	,
+0.094586895	,
+0.1002849	,
+0.105982906	,
+0.111680912	,
+0.11965812	,
+0.123646724	,
+0.131054131	,
+0.137321937	,
+0.142450142	,
+0.148148148	,
+0.153846154	,
+0.160683761	,
+0.164672365	,
+0.16980057	,
+0.171509972	)
+
+#check before ordering: 
+#matcheck <- data.frame(matrix(nrow = length(Time), ncol = 2))
+#matcheck[,1] <- Cum_death
+#matcheck[,2] <- Time
+#matcheck2 <- matcheck[order(matcheck[,1]),]
+#table(matcheck2[,2] ==matcheck2[order(matcheck2[,2]),2])
+
+#meaning Time and Cum_death can be ordened without generating wrong information
+
+Time <- Time[order(Time)]
+Cum_death <- Cum_death[order(Cum_death)]
+```
+
+Simplification death Time -> per 0.0001
+```{r}
+rm(Clarke)
+
+Clarke <- data.frame(matrix(nrow = 10000, ncol = 2))
+for(i in 1: 10000){
+
+  #Computation rownumber for death percentage i/10000   
+  start_d <- sum(Cum_death < i/10000)
+  if (start_d>0){ 
+  Clarke[i,1] <- i/10000
+  #estimate of time point for death equal to i/10000
+  Clarke[i,2] <- 
+  (i/10000 - Cum_death[start_d])/(Cum_death[start_d+1]-Cum_death[start_d])*
+  (Time[start_d+1]-Time[start_d])+
+    Time[start_d]
+  }
+  if (start_d == 0){
+  #for i/10000 smaller than first element in Cum_death
+  Clarke[i,1] <- i/10000
+  #time point for death i/10000
+  Clarke[i,2] <- 
+  (i/10000)/(Cum_death[1])*(Time[1])
+  
+  }
+  
+}
+
+
+#To plot the end result.  
+Clarke_plot <- Clarke
+#from death to survival
+Clarke_plot[,1] <- 1-Clarke_plot[,1]
+names(Clarke_plot) <- c("Survival", "Time")
+
+ggplot(data = Clarke_plot, mapping = aes(x = Time, y = Survival))+
+  geom_point()+
+  theme_bw() + 
+  theme(panel.grid.minor = element_blank())
+
+#saving figure
+ggsave("plot_Clarke.jpeg")
+
+#used when percentage sampled is above maximum percentage obtained from #Clarke. This would mean that the duration is longer than 11.96408. We only 
+#evaluate for first 10 years
+
+Clarke[,2]<-ifelse(is.na(Clarke[,2]), 1000, Clarke[,2])
+
+#distance betwen two subsequent percentages
+dist_Clarke <- Clarke[2,1] - Clarke[1,1]
+
+#extra for time point 0 having 0 deaths 
+Clarke <- rbind(c(0,0), Clarke)
+
+#For computational simplicity
+Clarke <- rbind(Clarke, c(1.1,1000))
+
+
+```
+
+
+#Basecase analyses 
+```{r , include=FALSE}
+set.seed(100)
+
+#Rivera paper 
+mean_HbA1c_effect <- -0.43
+SD_HbA1c_effect <- 0.17
+n_studies <- 19
+#number per arm -> we assume equal studies in sample size
+n_arm <- 7226/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+n_iterations <- 1000
+#to have HR 0.8 as a mid point
+beta <- 1.18
+
+#dataset in which the results will be stored per duration
+sim_Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+names(sim_Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+
+a <- 
+foreach(iteration = 1: n_iterations, .combine = 'c', .options.RNG=123, .packages= c("survival", "wCorr", "metafor", "boot")) %dorng% {
+#empty matrix in which the iterations results will be stored
+Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+#evaluation from 1 to 10 year
+
+#creation of the survival percentages for the patients in the trials
+pat1_iteration <- runif(n_arm*n_studies)
+pat2_iteration <- runif(n_arm*n_studies)
+
+for (duration in 1:10){
+#empty dataset to store results in for the 10 durations
+results <- data.frame(matrix(ncol = 3, nrow = 0))
+
+#creating trials
+for (trial in 1: n_studies){
+
+#HbA1c effect from normal distribution
+HbA1c_effect <- rnorm(1, mean_HbA1c_effect, SD_HbA1c_effect)
+
+#Mapping from HbA1c to underlying ln HR 
+ln_HR <- HbA1c_effect*beta
+#creation of the survival percentages for the patients in the trials
+pat1_iteration <- runif(n_arm*n_studies)
+pat2_iteration <- runif(n_arm*n_studies)
+
+#creation of the survival percentages for the patients in the trial
+#for all durations we use the same patients set up, so that fluctuations
+#are solely due to duration and not due to sampling new patients
+pat1 <- pat1_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+pat2 <- pat2_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+
+#From percentage to time:
+#Row to be used for percentages
+elt_Clarke1 <- trunc(pat1/dist_Clarke)+1
+
+#linear interpolation to obtain time point
+Time_pat1 <- (pat1-Clarke[elt_Clarke1,1])/dist_Clarke*
+  (Clarke[elt_Clarke1+1,2]-Clarke[elt_Clarke1,2])+Clarke[elt_Clarke1,2]
+
+#Active arm -> percentage under control can be computed given HR
+#that control percentage can be searched for (minus for ln HR to get to control)
+pat2_1 <- 1- (1-pat2)^(exp(-ln_HR))
+#element that pat2_1 is reached
+elt_Clarke2 <- trunc(pat2_1/dist_Clarke)+1
+#computation time by interpolation
+Time_pat2 <- (pat2_1-Clarke[elt_Clarke2,1])/dist_Clarke*
+  (Clarke[elt_Clarke2+1,2]-Clarke[elt_Clarke2,2])+Clarke[elt_Clarke2,2]
+
+#if Time_pat < duration then death, otherwise censoring at duration
+#here we cause thus that time points equal to 1000 are censored at duration
+cens_pat1 <- ifelse(Time_pat1 < duration, 0, 1)
+cens_pat2 <- ifelse(Time_pat2 < duration, 0, 1)
+
+Time_pat1 <- ifelse(Time_pat1 < duration, Time_pat1, duration)
+Time_pat2 <- ifelse(Time_pat2 < duration, Time_pat2, duration)
+
+data_Cox <- data.frame(time = c(Time_pat1, Time_pat2), 
+                       cens = c(cens_pat1, cens_pat2), tx )  
+
+#causing program to stop when something wrong is happening
+if(min(data_Cox$time) < 0){
+  print("time below 0")
+    Problem
+    return()
+  
+}
+
+#Cox model
+a <- coxph(Surv(data_Cox$time, 1-data_Cox$cens) ~ tx)
+
+#storage of results
+results <- rbind(results, c(HbA1c_effect, a$coefficients, a$var))
+
+}
+
+
+#Correlation. We use Pearson here as prediction is important. 
+#weighted for 1/var
+names(results) <- c("surrogate", "target", "target_var")
+
+boot.func <- function(dat, indices) {
+data1=dat[indices,]
+
+res <- weightedCorr(
+data1$surrogate,
+data1$target,
+method = "Pearson",
+weights = 1/data1$target_var,
+ML = FALSE,
+fast = TRUE
+)
+}
+
+res.boot <- boot(results, boot.func, R=1000)  
+
+#Storing into overall-results for duration
+Overall_results <- rbind(Overall_results, 
+c(duration, median(res.boot$t), quantile(res.boot$t, 0.025),
+  quantile(res.boot$t, 0.975)))
+}
+
+#Storing into data for the iterations
+names(Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+sim_Overall_results <- rbind(sim_Overall_results, Overall_results)
+
+#returning duration, R, lower bound and upper bound
+return(list(Overall_results$Duration, Overall_results$R, Overall_results[,3], Overall_results[,4]))
+
+}
+
+#a is created and is a list. 
+
+R <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R) <- c("Duration", "R")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  #2nd element is R, then every 4 times R is found back as list element in a
+  temp1$R <- a[[2+4*(i-1)]]
+  R <- rbind(R, temp1)  
+}
+#aggregation over all iterations
+R_agg <-aggregate(R$R, list(R$Duration), mean)
+
+#Lower bound and upper bound here taken as mean as it is over simulations
+
+R_LB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_LB) <- c("Duration", "R_LB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+#3rd element is R lower bound, then every 4 times R is found back as list element in a
+  temp1$R_LB <- a[[3+4*(i-1)]]
+  R_LB <- rbind(R_LB, temp1)  
+}
+#aggregation
+R_LB_agg <- aggregate(R_LB$R_LB, list(R_LB$Duration), mean)
+
+R_UB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_UB) <- c("Duration", "R_UB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+#4th element is R upper bound, then every 4 times R is found back as list element in a
+  temp1$R_UB <- a[[4+4*(i-1)]]
+  R_UB <- rbind(R_UB, temp1)  
+}
+#aggregation over all iterations
+R_UB_agg <-aggregate(R_UB$R_UB, list(R_UB$Duration), mean)
+
+
+#Putting the numbers in one matrix
+total_eval <- data.frame(matrix(nrow = 10, ncol = 4))
+total_eval$X1 <- as.numeric(seq(1,10))
+total_eval$X2 <- as.numeric(R_agg$x)
+total_eval$X3 <- as.numeric(R_LB_agg$x)
+total_eval$X4 <- as.numeric(R_UB_agg$x)
+names(total_eval) <- c("Years", "R_mean", "R_LB", "R_UB")
+
+write.csv(total_eval, "basecase1000.csv")
+
+```
+
+
+Plotting
+
+```{r}
+
+#Creating matrix in which results will be stored for plotting
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+#R mean
+total_eval2$Group[1:10]<- "R mean"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- R_agg$x
+
+#R lower bound
+total_eval2$Group[11:20]<- "R LB"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- R_LB_agg$x
+
+#R upper bound
+total_eval2$Group[21:30]<- "R UB"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- R_UB_agg$x
+
+#plot
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(round(min(total_eval2$Value),2), 0, 0.25,0.43,0.73, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(min(total_eval2$Value), 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+#saving plot
+ggsave("Basecase2.jpeg")
+
+```
+
+#Intermezzo Rivera analyses with only studies having more than 20 events
+```{r , include=FALSE}
+set.seed(100)
+
+#Rivera paper 
+mean_HbA1c_effect <- -0.43
+SD_HbA1c_effect <- 0.17
+n_studies <- 19
+#number per arm -> we assume equal studies in sample size
+n_arm <- 7226/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+
+#to have HR 0.8 as a mid point
+beta <- 1.18
+
+#dataset in which the results will be stored per duration
+sim_Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+names(sim_Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+
+#creating results from the different iterations
+a <- 
+foreach(iteration = 1: n_iterations, .combine = 'c', .options.RNG=123, .packages= c("survival", "wCorr", "metafor", "boot")) %dorng% {
+#empty matrix in which the iterations results will be stored
+Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+
+
+#creation of the survival percentages for the patients in the trial
+#for all durations we use the same patients set up, so that fluctuations
+#are solely due to duration and not due to sampling new patients
+
+#evaluation from 1 to 10 year
+for (duration in 1:10){
+
+#empty dataset to store results in for the 10 durations
+results <- data.frame(matrix(ncol = 3, nrow = 0))
+
+#creating trials
+#here we sample until we have the situation that we have the 19 studies
+while (length(results[,1]) < n_studies){
+
+#HbA1c effect from normal distribution
+HbA1c_effect <- rnorm(1, mean_HbA1c_effect, SD_HbA1c_effect)
+
+#Mapping from HbA1c to underlying ln HR 
+ln_HR <- HbA1c_effect*beta
+
+#creation of the survival percentages for the patients in the trial
+pat1 <- runif(n_arm)
+pat2 <- runif(n_arm)
+
+#model to come from percentage to time:
+
+#Control arm
+elt_Clarke1 <- trunc(pat1/dist_Clarke)+1
+#Interpolation
+Time_pat1 <- (pat1-Clarke[elt_Clarke1,1])/dist_Clarke*
+  (Clarke[elt_Clarke1+1,2]-Clarke[elt_Clarke1,2])+Clarke[elt_Clarke1,2]
+
+#Active arm -> first % to control 
+pat2_1 <- 1- (1-pat2)^(exp(-ln_HR))
+elt_Clarke2 <- trunc(pat2_1/dist_Clarke)+1
+#interpolation
+Time_pat2 <- (pat2_1-Clarke[elt_Clarke2,1])/dist_Clarke*
+  (Clarke[elt_Clarke2+1,2]-Clarke[elt_Clarke2,2])+Clarke[elt_Clarke2,2]
+
+#if Time_pat < duration then death, otherwise censoring at duration
+cens_pat1 <- ifelse(Time_pat1 < duration, 0, 1)
+cens_pat2 <- ifelse(Time_pat2 < duration, 0, 1)
+
+#Only when 20 events occurred according to Rivera inclusion criteria
+if(sum(cens_pat1 == 0) + sum(cens_pat2 ==0) >= 20){
+
+#evaluation for duration
+Time_pat1 <- ifelse(Time_pat1 < duration, Time_pat1, duration)
+Time_pat2 <- ifelse(Time_pat2 < duration, Time_pat2, duration)
+
+#data for Cox model
+data_Cox <- data.frame(time = c(Time_pat1, Time_pat2), 
+                       cens = c(cens_pat1, cens_pat2), tx )  
+
+#causing program to stop when something goes wrong
+#causing program to stop when something wrong is happening
+if(min(data_Cox$time) < 0){
+  print("time below 0")
+  Problem
+  return()
+}
+
+#Cox model
+a <- coxph(Surv(data_Cox$time, 1-data_Cox$cens) ~ tx)
+
+#Storing results
+results <- rbind(results, c(HbA1c_effect, a$coefficients, a$var))
+
+}
+}
+
+#We use pearson here as prediction is important. 
+#Correlation. We use Pearson here as prediction is important. 
+#weighted for 1/var
+names(results) <- c("surrogate", "target", "target_var")
+
+boot.func <- function(dat, indices) {
+data1=dat[indices,]
+
+res <- weightedCorr(
+data1$surrogate,
+data1$target,
+method = "Pearson",
+weights = 1/data1$target_var,
+ML = FALSE,
+fast = TRUE
+)
+}
+
+res.boot <- boot(results, boot.func, R=10000)  
+
+#Storing into overall-results for duration
+Overall_results <- rbind(Overall_results, 
+c(duration, median(res.boot$t), quantile(res.boot$t, 0.025),
+  quantile(res.boot$t, 0.975)))
+
+}
+
+#storing into data for the iterations
+names(Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+sim_Overall_results <- rbind(sim_Overall_results, Overall_results)
+return(list(Overall_results$Duration, Overall_results$R, Overall_results[,3], Overall_results[,4]))
+}
+
+
+#Lower bound and upper bound here taken as mean as it is over simulations
+R <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R) <- c("Duration", "R")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  #R is 2nd element and then 4 elements further in a
+  temp1$R <- a[[2+4*(i-1)]]
+  R <- rbind(R, temp1)  
+}
+R_agg <-aggregate(R$R, list(R$Duration), mean)
+
+#Lower bound and upper bound here taken as mean as it is over simulations
+
+R_LB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_LB) <- c("Duration", "R_LB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  #R lower bound is 3rd element and then 4 elements further in a
+  temp1$R_LB <- a[[3+4*(i-1)]]
+  R_LB <- rbind(R_LB, temp1)  
+}
+R_LB_agg <- aggregate(R_LB$R_LB, list(R_LB$Duration), mean)
+
+R_UB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_UB) <- c("Duration", "R_UB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  #R upper bound 4th element and then 4 elements further in a
+  temp1$R_UB <- a[[4+4*(i-1)]]
+  R_UB <- rbind(R_UB, temp1)  
+}
+R_UB_agg <-aggregate(R_UB$R_UB, list(R_UB$Duration), mean)
+
+
+#Putting the numbers in one matrix
+#Putting the numbers in one matrix
+total_eval <- data.frame(matrix(nrow = 10, ncol = 4))
+total_eval$X1 <- as.numeric(seq(1,10))
+total_eval$X2 <- as.numeric(R_agg$x)
+total_eval$X3 <- as.numeric(R_LB_agg$x)
+total_eval$X4 <- as.numeric(R_UB_agg$x)
+names(total_eval) <- c("Years", "R_mean", "R_LB", "R_UB")
+
+write.csv(total_eval, "basecase1000_20events.csv")
+
+```
+
+Figure
+```{r}
+
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+total_eval2$Group[1:10]<- "R mean"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- R_agg$x
+
+total_eval2$Group[11:20]<- "R LB"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- R_LB_agg$x
+
+total_eval2$Group[21:30]<- "R UB"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- R_UB_agg$x
+
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(round(min(total_eval2$Value),2), 0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(min(total_eval2$Value), 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("Basecase 20 events.jpeg")
+
+
+```
+
+#Relative risk survival 
+
+In this simulation no censoring is taking place. As such, the relative risk can be computed as percentage death under active/percentage death under control. Only the point estimate is needed. 
+
+```{r , include=FALSE}
+set.seed(100)
+
+#Rivera paper 
+mean_HbA1c_effect <- -0.43
+SD_HbA1c_effect <- 0.17
+n_studies <- 19
+#number per arm -> we assume equal studies in sample size
+n_arm <- 7226/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+n_iterations <- 1000
+#to have HR 0.8 as a mid point
+beta <- 1.18
+
+#dataset in which the results will be stored per duration
+sim_Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+names(sim_Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+
+a <- 
+  foreach(iteration = 1: n_iterations, .combine = 'c', .options.RNG=123, .packages= c("survival", "wCorr", "metafor", "boot")) %dorng% {
+
+    
+iteration = 1    
+#empty matrix in which the iterations results will be stored
+Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+#evaluation from 1 to 10 year
+
+#creation of the survival percentages for the patients in the trials
+pat1_iteration <- runif(n_arm*n_studies)
+pat2_iteration <- runif(n_arm*n_studies)
+
+for (duration in 1:10){
+#empty dataset to store results in for the 10 durations
+results <- data.frame(matrix(ncol = 3, nrow = 0))
+
+#creating trials
+for (trial in 1: n_studies){
+
+#HbA1c effect from normal distribution
+HbA1c_effect <- rnorm(1, mean_HbA1c_effect, SD_HbA1c_effect)
+
+#Mapping from HbA1c to underlying ln HR 
+ln_HR <- HbA1c_effect*beta
+#creation of the survival percentages for the patients in the trials
+pat1_iteration <- runif(n_arm*n_studies)
+pat2_iteration <- runif(n_arm*n_studies)
+
+#creation of the survival percentages for the patients in the trial
+#for all durations we use the same patients set up, so that fluctuations
+#are solely due to duration and not due to sampling new patients
+pat1 <- pat1_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+pat2 <- pat2_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+
+#From percentage to time:
+#Row to be used for percentages
+elt_Clarke1 <- trunc(pat1/dist_Clarke)+1
+
+#linear interpolation to obtain time point
+Time_pat1 <- (pat1-Clarke[elt_Clarke1,1])/dist_Clarke*
+  (Clarke[elt_Clarke1+1,2]-Clarke[elt_Clarke1,2])+Clarke[elt_Clarke1,2]
+
+#Active arm -> percentage under control can be computed given HR
+#that control percentage can be searched for (minus for ln HR to get to control)
+pat2_1 <- 1- (1-pat2)^(exp(-ln_HR))
+#element that pat2_1 is reached
+elt_Clarke2 <- trunc(pat2_1/dist_Clarke)+1
+#computation time by interpolation
+Time_pat2 <- (pat2_1-Clarke[elt_Clarke2,1])/dist_Clarke*
+  (Clarke[elt_Clarke2+1,2]-Clarke[elt_Clarke2,2])+Clarke[elt_Clarke2,2]
+
+#if Time_pat < duration then death, otherwise censoring at duration
+#here we cause thus that time points equal to 1000 are censored at duration
+cens_pat1 <- ifelse(Time_pat1 < duration, 0, 1)
+cens_pat2 <- ifelse(Time_pat2 < duration, 0, 1)
+
+#Relative risk
+RR <- (1- mean(cens_pat2))/(1- mean(cens_pat1))
+log_RR <- log(RR)
+
+#variance RR
+
+a <- log_RR
+
+IE <-  sum(1-cens_pat2)
+IN <- sum(cens_pat2)
+CE <-  sum(1-cens_pat1)
+CN <-  sum(cens_pat1)
+  
+var_log_RR <- IN/(IE*(IE+IN))+ CN/(CE*(CE+CN))
+
+#storage of results
+results <- rbind(results, c(HbA1c_effect, a, var_log_RR))
+}
+
+
+results <- results[which(rowSums(is.na(results)) == 0),]
+#Correlation. We use Pearson here as prediction is important. 
+#weighted for 1/var
+names(results) <- c("surrogate", "target", "target_var")
+
+
+boot.func <- function(dat, indices) {
+data1=dat[indices,]
+
+res <- weightedCorr(
+data1$surrogate,
+data1$target,
+method = "Pearson",
+weights = 1/data1$target_var,
+ML = FALSE,
+fast = TRUE
+)
+}
+
+res.boot <- boot(results, boot.func, R=10000)  
+
+#Storing into overall-results for duration
+Overall_results <- rbind(Overall_results, 
+c(duration, median(res.boot$t), quantile(res.boot$t, 0.025),
+  quantile(res.boot$t, 0.975)))
+
+}
+
+#Storing into data for the iterations
+names(Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+sim_Overall_results <- rbind(sim_Overall_results, Overall_results)
+
+#returning duration, R, lower bound and upper bound
+return(list(Overall_results$Duration, Overall_results$R, Overall_results[,3], Overall_results[,4]))
+
+}
+
+#a is created and is a list. 
+
+R <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R) <- c("Duration", "R")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  #2nd element is R, then every 4 times R is found back as list element in a
+  temp1$R <- a[[2+4*(i-1)]]
+  R <- rbind(R, temp1)  
+}
+#aggregation over all iterations
+R_agg <-aggregate(R$R, list(R$Duration), mean)
+
+#Lower bound and upper bound here taken as mean as it is over simulations
+
+R_LB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_LB) <- c("Duration", "R_LB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+#3rd element is R lower bound, then every 4 times R is found back as list element in a
+  temp1$R_LB <- a[[3+4*(i-1)]]
+  R_LB <- rbind(R_LB, temp1)  
+}
+#aggregation
+R_LB_agg <- aggregate(R_LB$R_LB, list(R_LB$Duration), mean)
+
+R_UB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_UB) <- c("Duration", "R_UB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+#4th element is R upper bound, then every 4 times R is found back as list element in a
+  temp1$R_UB <- a[[4+4*(i-1)]]
+  R_UB <- rbind(R_UB, temp1)  
+}
+#aggregation over all iterations
+R_UB_agg <-aggregate(R_UB$R_UB, list(R_UB$Duration), mean)
+
+
+#Putting the numbers in one matrix
+total_eval <- data.frame(matrix(nrow = 10, ncol = 4))
+total_eval$X1 <- as.numeric(seq(1,10))
+total_eval$X2 <- as.numeric(R_agg$x)
+total_eval$X3 <- as.numeric(R_LB_agg$x)
+total_eval$X4 <- as.numeric(R_UB_agg$x)
+names(total_eval) <- c("Years", "R_mean", "R_LB", "R_UB")
+
+write.csv(total_eval, "Relative_Risk.csv")
+
+```
+
+
+Plotting
+
+```{r}
+
+#Creating matrix in which results will be stored for plotting
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+#R mean
+total_eval2$Group[1:10]<- "R mean"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- R_agg$x
+
+#R lower bound
+total_eval2$Group[11:20]<- "R LB"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- R_LB_agg$x
+
+#R upper bound
+total_eval2$Group[21:30]<- "R UB"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- R_UB_agg$x
+
+#plot
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(round(min(total_eval2$Value),2), 0, 0.25,0.43,0.73, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(min(total_eval2$Value), 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+#saving plot
+ggsave("Relative Risk.jpeg")
+
+```
+
+
+#Risk difference
+
+In this simulation no censoring is taking place. As such, the risk difference can be computed as percentage death under active/percentage death under control. Only the point estimate is needed. 
+
+```{r , include=FALSE}
+set.seed(100)
+
+#Rivera paper 
+mean_HbA1c_effect <- -0.43
+SD_HbA1c_effect <- 0.17
+n_studies <- 19
+#number per arm -> we assume equal studies in sample size
+n_arm <- 7226/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+n_iterations <- 1000
+#to have HR 0.8 as a mid point
+beta <- 1.18
+
+#dataset in which the results will be stored per duration
+sim_Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+names(sim_Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+
+a <- 
+  foreach(iteration = 1: n_iterations, .combine = 'c', .options.RNG=123, .packages= c("survival", "wCorr", "metafor", "boot")) %dorng% {
+#empty matrix in which the iterations results will be stored
+Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+#evaluation from 1 to 10 year
+
+#creation of the survival percentages for the patients in the trials
+pat1_iteration <- runif(n_arm*n_studies)
+pat2_iteration <- runif(n_arm*n_studies)
+
+for (duration in 1:10){
+#empty dataset to store results in for the 10 durations
+results <- data.frame(matrix(ncol = 3, nrow = 0))
+
+#creating trials
+for (trial in 1: n_studies){
+
+#HbA1c effect from normal distribution
+HbA1c_effect <- rnorm(1, mean_HbA1c_effect, SD_HbA1c_effect)
+
+#Mapping from HbA1c to underlying ln HR 
+ln_HR <- HbA1c_effect*beta
+#creation of the survival percentages for the patients in the trials
+pat1_iteration <- runif(n_arm*n_studies)
+pat2_iteration <- runif(n_arm*n_studies)
+
+#creation of the survival percentages for the patients in the trial
+#for all durations we use the same patients set up, so that fluctuations
+#are solely due to duration and not due to sampling new patients
+pat1 <- pat1_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+pat2 <- pat2_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+
+#From percentage to time:
+#Row to be used for percentages
+elt_Clarke1 <- trunc(pat1/dist_Clarke)+1
+
+#linear interpolation to obtain time point
+Time_pat1 <- (pat1-Clarke[elt_Clarke1,1])/dist_Clarke*
+  (Clarke[elt_Clarke1+1,2]-Clarke[elt_Clarke1,2])+Clarke[elt_Clarke1,2]
+
+#Active arm -> percentage under control can be computed given HR
+#that control percentage can be searched for (minus for ln HR to get to control)
+pat2_1 <- 1- (1-pat2)^(exp(-ln_HR))
+#element that pat2_1 is reached
+elt_Clarke2 <- trunc(pat2_1/dist_Clarke)+1
+#computation time by interpolation
+Time_pat2 <- (pat2_1-Clarke[elt_Clarke2,1])/dist_Clarke*
+  (Clarke[elt_Clarke2+1,2]-Clarke[elt_Clarke2,2])+Clarke[elt_Clarke2,2]
+
+#if Time_pat < duration then death, otherwise censoring at duration
+#here we cause thus that time points equal to 1000 are censored at duration
+cens_pat1 <- ifelse(Time_pat1 < duration, 0, 1)
+cens_pat2 <- ifelse(Time_pat2 < duration, 0, 1)
+
+#Risk difference
+RD <- (1-mean(cens_pat2)) - (1- mean(cens_pat1))
+a <- RD
+
+EE <- sum(1-cens_pat2) 
+EN <- sum(cens_pat2) 
+CE <- sum(1-cens_pat1)
+CN <- sum(cens_pat1)
+
+var_RD <- EE*EN/(EE+EN)^3 +CE*CN/(CE+CN)^3
+
+#storage of results
+results <- rbind(results, c(HbA1c_effect, a, var_RD))
+}
+
+#Correlation. We use Pearson here as prediction is important. 
+    #weighted for 1/var
+    names(results) <- c("surrogate", "target", "target_var")
+    
+    boot.func <- function(dat, indices) {
+      data1=dat[indices,]
+      
+      res <- weightedCorr(
+        data1$surrogate,
+        data1$target,
+        method = "Pearson",
+        weights = 1/data1$target_var,
+        ML = FALSE,
+        fast = TRUE
+      )
+    }
+    
+    res.boot <- boot(results, boot.func, R=10000)  
+    
+    #Storing into overall-results for duration
+    Overall_results <- rbind(Overall_results, 
+                             c(duration, median(res.boot$t),
+                               quantile(res.boot$t, 0.025),
+                               quantile(res.boot$t, 0.975)))
+    
+}
+
+#Storing into data for the iterations
+names(Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+sim_Overall_results <- rbind(sim_Overall_results, Overall_results)
+
+#returning duration, R, lower bound and upper bound
+return(list(Overall_results$Duration, Overall_results$R, Overall_results[,3], Overall_results[,4]))
+
+}
+
+#a is created and is a list. 
+
+R <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R) <- c("Duration", "R")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  #2nd element is R, then every 4 times R is found back as list element in a
+  temp1$R <- a[[2+4*(i-1)]]
+  R <- rbind(R, temp1)  
+}
+#aggregation over all iterations
+R_agg <-aggregate(R$R, list(R$Duration), mean)
+
+#Lower bound and upper bound here taken as mean as it is over simulations
+
+R_LB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_LB) <- c("Duration", "R_LB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+#3rd element is R lower bound, then every 4 times R is found back as list element in a
+  temp1$R_LB <- a[[3+4*(i-1)]]
+  R_LB <- rbind(R_LB, temp1)  
+}
+#aggregation
+R_LB_agg <- aggregate(R_LB$R_LB, list(R_LB$Duration), mean)
+
+R_UB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_UB) <- c("Duration", "R_UB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+#4th element is R upper bound, then every 4 times R is found back as list element in a
+  temp1$R_UB <- a[[4+4*(i-1)]]
+  R_UB <- rbind(R_UB, temp1)  
+}
+#aggregation over all iterations
+R_UB_agg <-aggregate(R_UB$R_UB, list(R_UB$Duration), mean)
+
+
+#Putting the numbers in one matrix
+total_eval <- data.frame(matrix(nrow = 10, ncol = 4))
+total_eval$X1 <- as.numeric(seq(1,10))
+total_eval$X2 <- as.numeric(R_agg$x)
+total_eval$X3 <- as.numeric(R_LB_agg$x)
+total_eval$X4 <- as.numeric(R_UB_agg$x)
+names(total_eval) <- c("Years", "R_mean", "R_LB", "R_UB")
+
+write.csv(total_eval, "Risk Difference.csv")
+
+```
+
+
+Plotting
+
+```{r}
+
+#Creating matrix in which results will be stored for plotting
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+#R mean
+total_eval2$Group[1:10]<- "R mean"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- R_agg$x
+
+#R lower bound
+total_eval2$Group[11:20]<- "R LB"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- R_LB_agg$x
+
+#R upper bound
+total_eval2$Group[21:30]<- "R UB"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- R_UB_agg$x
+
+#plot
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(round(min(total_eval2$Value),2), 0, 0.25,0.43,0.73, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(min(total_eval2$Value), 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+#saving plot
+ggsave("Risk Difference.jpeg")
+
+```
+
+
+#Scenario Weibull
+```{r , include=FALSE}
+set.seed(100)
+
+#Rivera paper 
+mean_HbA1c_effect <- -0.43
+SD_HbA1c_effect <- 0.17
+n_studies <- 19
+#number per arm -> we assume equal studies in sample size
+n_arm <- 7226/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+n_iterations <- 1000
+#to have HR 0.8 as a mid point
+beta <- 1.18
+
+#dataset in which the results will be stored per duration
+sim_Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+names(sim_Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+
+a <- 
+  foreach(iteration = 1: n_iterations, .combine = 'c', .options.RNG=123, .packages= c("survival", "wCorr", "metafor", "boot", "flexsurv")) %dorng% {
+#empty matrix in which the iterations results will be stored
+
+Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+#evaluation from 1 to 10 year
+
+#creation of the survival percentages for the patients in the trials
+pat1_iteration <- runif(n_arm*n_studies)
+pat2_iteration <- runif(n_arm*n_studies)
+
+for (duration in 1:10){
+#empty dataset to store results in for the 10 durations
+results <- data.frame(matrix(ncol = 3, nrow = 0))
+
+#creating trials
+for (trial in 1: n_studies){
+
+#HbA1c effect from normal distribution
+HbA1c_effect <- rnorm(1, mean_HbA1c_effect, SD_HbA1c_effect)
+
+#Mapping from HbA1c to underlying HR 
+ln_HR <- HbA1c_effect*beta
+
+#creation of the survival percentages for the patients in the trial
+#for all durations we use the same patients set up, so that fluctuations
+#are solely due to duration and not due to sampling new patients
+pat1 <- pat1_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+pat2 <- pat2_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+
+#From percentage to time:
+#Row to be used for percentages
+elt_Clarke1 <- trunc(pat1/dist_Clarke)+1
+Time_pat1 <- (pat1-Clarke[elt_Clarke1,1])/dist_Clarke*
+  (Clarke[elt_Clarke1+1,2]-Clarke[elt_Clarke1,2])+Clarke[elt_Clarke1,2]
+
+#Active arm -> percentage under control can be computed given HR
+#that control percentage can be searched for (minus for ln HR to get to control)
+pat2_1 <- 1- (1-pat2)^(exp(-ln_HR))
+elt_Clarke2 <- trunc(pat2_1/dist_Clarke)+1
+Time_pat2 <- (pat2_1-Clarke[elt_Clarke2,1])/dist_Clarke*
+  (Clarke[elt_Clarke2+1,2]-Clarke[elt_Clarke2,2])+Clarke[elt_Clarke2,2]
+
+#if Time_pat < duration then death, otherwise censoring at duration
+cens_pat1 <- ifelse(Time_pat1 < duration, 0, 1)
+cens_pat2 <- ifelse(Time_pat2 < duration, 0, 1)
+
+Time_pat1 <- ifelse(Time_pat1 < duration, Time_pat1, duration)
+Time_pat2 <- ifelse(Time_pat2 < duration, Time_pat2, duration)
+
+data_Cox <- data.frame(time = c(Time_pat1, Time_pat2), 
+                       cens = c(cens_pat1, cens_pat2), tx )  
+
+#causing program to stop when something wrong is happening
+if(min(data_Cox$time) < 0){
+  print("time below 0")
+  Problem
+  return()
+}
+
+#Weibull distribution fitted
+a <- flexsurvreg(Surv(data_Cox$time, 1-data_Cox$cens) ~ tx, 
+                 dist = "weibull", inits = c(1,1,1))
+
+cof_a <- a$coefficients[3]
+var_a <- a$cov[3,3]
+#adjusting for expected negative correlation 
+results <- rbind(results, c(HbA1c_effect, -cof_a, var_a))
+}
+
+    #Correlation. We use Pearson here as prediction is important. 
+    #weighted for 1/var
+    names(results) <- c("surrogate", "target", "target_var")
+    
+    boot.func <- function(dat, indices) {
+      data1=dat[indices,]
+      
+      res <- weightedCorr(
+        data1$surrogate,
+        data1$target,
+        method = "Pearson",
+        weights = 1/data1$target_var,
+        ML = FALSE,
+        fast = TRUE
+      )
+    }
+    
+    res.boot <- boot(results, boot.func, R=10000)  
+    
+    #Storing into overall-results for duration
+    Overall_results <- rbind(Overall_results, 
+                             c(duration, median(res.boot$t),
+                               quantile(res.boot$t, 0.025),
+                               quantile(res.boot$t, 0.975)))
+    
+}
+
+#Storing into data for the iterations
+names(Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+sim_Overall_results <- rbind(sim_Overall_results, Overall_results)
+
+return(list(Overall_results$Duration, Overall_results$R, Overall_results[,3], Overall_results[,4]))
+
+}
+
+R <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R) <- c("Duration", "R")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R <- a[[2+4*(i-1)]]
+  R <- rbind(R, temp1)  
+}
+R_agg <-aggregate(R$R, list(R$Duration), mean)
+
+#Lower bound and upper bound here taken as mean as it is over simulations
+
+R_LB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_LB) <- c("Duration", "R_LB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_LB <- a[[3+4*(i-1)]]
+  R_LB <- rbind(R_LB, temp1)  
+}
+R_LB_agg <- aggregate(R_LB$R_LB, list(R_LB$Duration), mean)
+
+R_UB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_UB) <- c("Duration", "R_UB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_UB <- a[[4+4*(i-1)]]
+  R_UB <- rbind(R_UB, temp1)  
+}
+R_UB_agg <-aggregate(R_UB$R_UB, list(R_UB$Duration), mean)
+
+
+#Putting the numbers in one matrix
+total_eval <- data.frame(matrix(nrow = 10, ncol = 4))
+total_eval$X1 <- as.numeric(seq(1,10))
+total_eval$X2 <- as.numeric(R_agg$x)
+total_eval$X3 <- as.numeric(R_LB_agg$x)
+total_eval$X4 <- as.numeric(R_UB_agg$x)
+names(total_eval) <- c("Years", "R_mean", "R_LB", "R_UB")
+
+write.csv(total_eval, "basecase1000_Weibull.csv")
+
+
+
+```
+
+
+Plotting
+
+```{r}
+
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+total_eval2$Group[1:10]<- "R mean"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- R_agg$x
+
+total_eval2$Group[11:20]<- "R LB"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- R_LB_agg$x
+
+total_eval2$Group[21:30]<- "R UB"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- R_UB_agg$x
+
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(round(min(total_eval2$Value),2), 0, 0.25,0.43,0.73, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(min(total_eval2$Value), 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("Basecase2 Weibull.jpeg")
+
+```
+
+#Scenario lognormal
+```{r , include=FALSE}
+set.seed(100)
+
+#Rivera paper 
+mean_HbA1c_effect <- -0.43
+SD_HbA1c_effect <- 0.17
+n_studies <- 19
+#number per arm -> we assume equal studies in sample size
+n_arm <- 7226/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+n_iterations <- 1000
+#to have HR 0.8 as a mid point
+beta <- 1.18
+
+#dataset in which the results will be stored per duration
+sim_Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+names(sim_Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+
+
+n_iterations <- 100
+a <- 
+  foreach(iteration = 1: n_iterations, .combine = 'c', .options.RNG=123, .packages= c("survival", "wCorr", "metafor", "boot", "flexsurv")) %dorng% {
+#empty matrix in which the iterations results will be stored
+
+Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+#evaluation from 1 to 10 year
+
+#creation of the survival percentages for the patients in the trials
+pat1_iteration <- runif(n_arm*n_studies)
+pat2_iteration <- runif(n_arm*n_studies)
+
+for (duration in 1:10){
+#empty dataset to store results in for the 10 durations
+results <- data.frame(matrix(ncol = 3, nrow = 0))
+
+#creating trials
+for (trial in 1: n_studies){
+
+#HbA1c effect from normal distribution
+HbA1c_effect <- rnorm(1, mean_HbA1c_effect, SD_HbA1c_effect)
+
+#Mapping from HbA1c to underlying HR 
+ln_HR <- HbA1c_effect*beta
+
+#creation of the survival percentages for the patients in the trial
+#for all durations we use the same patients set up, so that fluctuations
+#are solely due to duration and not due to sampling new patients
+pat1 <- pat1_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+pat2 <- pat2_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+
+#From percentage to time:
+#Row to be used for percentages
+elt_Clarke1 <- trunc(pat1/dist_Clarke)+1
+Time_pat1 <- (pat1-Clarke[elt_Clarke1,1])/dist_Clarke*
+  (Clarke[elt_Clarke1+1,2]-Clarke[elt_Clarke1,2])+Clarke[elt_Clarke1,2]
+
+#Active arm -> percentage under control can be computed given HR
+#that control percentage can be searched for (minus for ln HR to get to control)
+pat2_1 <- 1- (1-pat2)^(exp(-ln_HR))
+elt_Clarke2 <- trunc(pat2_1/dist_Clarke)+1
+Time_pat2 <- (pat2_1-Clarke[elt_Clarke2,1])/dist_Clarke*
+  (Clarke[elt_Clarke2+1,2]-Clarke[elt_Clarke2,2])+Clarke[elt_Clarke2,2]
+
+#if Time_pat < duration then death, otherwise censoring at duration
+cens_pat1 <- ifelse(Time_pat1 < duration, 0, 1)
+cens_pat2 <- ifelse(Time_pat2 < duration, 0, 1)
+
+Time_pat1 <- ifelse(Time_pat1 < duration, Time_pat1, duration)
+Time_pat2 <- ifelse(Time_pat2 < duration, Time_pat2, duration)
+
+data_Cox <- data.frame(time = c(Time_pat1, Time_pat2), 
+                       cens = c(cens_pat1, cens_pat2), tx )  
+
+#causing program to stop when something wrong is happening
+if(min(data_Cox$time) < 0){
+  print("time below 0")
+  Problem
+  return()
+}
+#lognormal
+a <- flexsurvreg(Surv(data_Cox$time, 1-data_Cox$cens) ~ tx, dist = "lnorm", inits = c(1,1,1))
+
+cof_a <- a$coefficients[3]
+var_a <- a$cov[3,3]
+
+results <- rbind(results, c(HbA1c_effect, -cof_a, var_a))
+}
+
+
+    #Correlation. We use Pearson here as prediction is important. 
+    #weighted for 1/var
+    names(results) <- c("surrogate", "target", "target_var")
+    
+    boot.func <- function(dat, indices) {
+      data1=dat[indices,]
+      
+      res <- weightedCorr(
+        data1$surrogate,
+        data1$target,
+        method = "Pearson",
+        weights = 1/data1$target_var,
+        ML = FALSE,
+        fast = TRUE
+      )
+    }
+    
+    res.boot <- boot(results, boot.func, R=10000)  
+    
+    #Storing into overall-results for duration
+    Overall_results <- rbind(Overall_results, 
+                             c(duration, median(res.boot$t),
+                               quantile(res.boot$t, 0.025),
+                               quantile(res.boot$t, 0.975)))
+    
+}
+
+#Storing into data for the iterations
+names(Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+sim_Overall_results <- rbind(sim_Overall_results, Overall_results)
+
+return(list(Overall_results$Duration, Overall_results$R, Overall_results[,3], Overall_results[,4]))
+
+}
+
+R <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R) <- c("Duration", "R")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R <- a[[2+4*(i-1)]]
+  R <- rbind(R, temp1)  
+}
+R_agg <-aggregate(R$R, list(R$Duration), mean)
+
+#Lower bound and upper bound here taken as mean as it is over simulations
+
+R_LB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_LB) <- c("Duration", "R_LB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_LB <- a[[3+4*(i-1)]]
+  R_LB <- rbind(R_LB, temp1)  
+}
+R_LB_agg <- aggregate(R_LB$R_LB, list(R_LB$Duration), mean)
+
+R_UB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_UB) <- c("Duration", "R_UB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_UB <- a[[4+4*(i-1)]]
+  R_UB <- rbind(R_UB, temp1)  
+}
+R_UB_agg <-aggregate(R_UB$R_UB, list(R_UB$Duration), mean)
+
+
+#Putting the numbers in one matrix
+total_eval <- data.frame(matrix(nrow = 10, ncol = 4))
+total_eval$X1 <- as.numeric(seq(1,10))
+total_eval$X2 <- as.numeric(R_agg$x)
+total_eval$X3 <- as.numeric(R_LB_agg$x)
+total_eval$X4 <- as.numeric(R_UB_agg$x)
+names(total_eval) <- c("Years", "R_mean", "R_LB", "R_UB")
+
+write.csv(total_eval, "basecase1000_lnorm.csv")
+
+
+```
+
+
+Plotting
+
+```{r}
+
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+total_eval2$Group[1:10]<- "R mean"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- R_agg$x
+
+total_eval2$Group[11:20]<- "R LB"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- R_LB_agg$x
+
+total_eval2$Group[21:30]<- "R UB"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- R_UB_agg$x
+
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(round(min(total_eval2$Value),2), 0, 0.25,0.43,0.73, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(min(total_eval2$Value), 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("Basecase2 lognormal.jpeg")
+
+```
+
+#Loglogistic
+```{r , include=FALSE}
+set.seed(100)
+
+#Rivera paper 
+mean_HbA1c_effect <- -0.43
+SD_HbA1c_effect <- 0.17
+n_studies <- 19
+#number per arm -> we assume equal studies in sample size
+n_arm <- 7226/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+n_iterations <- 100
+#to have HR 0.8 as a mid point
+beta <- 1.18
+
+#dataset in which the results will be stored per duration
+sim_Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+names(sim_Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+
+a <- 
+  foreach(iteration = 1: n_iterations, .combine = 'c', .options.RNG=123, .packages= c("survival", "wCorr", "metafor", "boot", "flexsurv")) %dorng% {
+#empty matrix in which the iterations results will be stored
+Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+
+#creation of the survival percentages for the patients in the trials
+pat1_iteration <- runif(n_arm*n_studies)
+pat2_iteration <- runif(n_arm*n_studies)
+
+#evaluation from 1 to 10 year
+for (duration in 1:10){
+#empty dataset to store results in for the 10 durations
+results <- data.frame(matrix(ncol = 3, nrow = 0))
+
+#creating trials
+for (trial in 1: n_studies){
+
+#HbA1c effect from normal distribution
+HbA1c_effect <- rnorm(1, mean_HbA1c_effect, SD_HbA1c_effect)
+
+#Mapping from HbA1c to underlying HR 
+ln_HR <- HbA1c_effect*beta
+
+#creation of the survival percentages for the patients in the trial
+#for all durations we use the same patients set up, so that fluctuations
+#are solely due to duration and not due to sampling new patients
+pat1 <- pat1_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+pat2 <- pat2_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+
+#From percentage to time:
+#Row to be used for percentages
+elt_Clarke1 <- trunc(pat1/dist_Clarke)+1
+Time_pat1 <- (pat1-Clarke[elt_Clarke1,1])/dist_Clarke*
+  (Clarke[elt_Clarke1+1,2]-Clarke[elt_Clarke1,2])+Clarke[elt_Clarke1,2]
+
+#Active arm -> percentage under control can be computed given HR
+#that control percentage can be searched for (minus for ln HR to get to control)
+pat2_1 <- 1- (1-pat2)^(exp(-ln_HR))
+elt_Clarke2 <- trunc(pat2_1/dist_Clarke)+1
+Time_pat2 <- (pat2_1-Clarke[elt_Clarke2,1])/dist_Clarke*
+  (Clarke[elt_Clarke2+1,2]-Clarke[elt_Clarke2,2])+Clarke[elt_Clarke2,2]
+
+#if Time_pat < duration then death, otherwise censoring at duration
+cens_pat1 <- ifelse(Time_pat1 < duration, 0, 1)
+cens_pat2 <- ifelse(Time_pat2 < duration, 0, 1)
+
+Time_pat1 <- ifelse(Time_pat1 < duration, Time_pat1, duration)
+Time_pat2 <- ifelse(Time_pat2 < duration, Time_pat2, duration)
+
+data_Cox <- data.frame(time = c(Time_pat1, Time_pat2), 
+                       cens = c(cens_pat1, cens_pat2), tx )  
+
+#causing program to stop when something wrong is happening
+if(min(data_Cox$time) < 0){
+  print("time below 0")
+  Problem
+  return()
+}
+
+#loglogistic
+a <- flexsurvreg(Surv(data_Cox$time, 1-data_Cox$cens) ~ tx, dist = "llogis", inits=c(1,1,1))
+
+cof_a <- a$coefficients[3]
+var_a <- a$cov[3,3]
+
+results <- rbind(results, c(HbA1c_effect, -cof_a, var_a))
+}
+
+    #Correlation. We use Pearson here as prediction is important. 
+    #weighted for 1/var
+    names(results) <- c("surrogate", "target", "target_var")
+    
+    boot.func <- function(dat, indices) {
+      data1=dat[indices,]
+      
+      res <- weightedCorr(
+        data1$surrogate,
+        data1$target,
+        method = "Pearson",
+        weights = 1/data1$target_var,
+        ML = FALSE,
+        fast = TRUE
+      )
+    }
+    
+    res.boot <- boot(results, boot.func, R=10000)  
+    
+    #Storing into overall-results for duration
+    Overall_results <- rbind(Overall_results, 
+                             c(duration, median(res.boot$t),
+                               quantile(res.boot$t, 0.025),
+                               quantile(res.boot$t, 0.975)))
+    
+}
+
+#Storing into data for the iterations
+names(Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+sim_Overall_results <- rbind(sim_Overall_results, Overall_results)
+
+return(list(Overall_results$Duration, Overall_results$R, Overall_results[,3], Overall_results[,4]))
+
+}
+
+R <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R) <- c("Duration", "R")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R <- a[[2+4*(i-1)]]
+  R <- rbind(R, temp1)  
+}
+R_agg <-aggregate(R$R, list(R$Duration), mean)
+
+#Lower bound and upper bound here taken as mean as it is over simulations
+
+R_LB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_LB) <- c("Duration", "R_LB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_LB <- a[[3+4*(i-1)]]
+  R_LB <- rbind(R_LB, temp1)  
+}
+R_LB_agg <- aggregate(R_LB$R_LB, list(R_LB$Duration), mean)
+
+R_UB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_UB) <- c("Duration", "R_UB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_UB <- a[[4+4*(i-1)]]
+  R_UB <- rbind(R_UB, temp1)  
+}
+R_UB_agg <-aggregate(R_UB$R_UB, list(R_UB$Duration), mean)
+
+
+#Putting the numbers in one matrix
+total_eval <- data.frame(matrix(nrow = 10, ncol = 4))
+total_eval$X1 <- as.numeric(seq(1,10))
+total_eval$X2 <- as.numeric(R_agg$x)
+total_eval$X3 <- as.numeric(R_LB_agg$x)
+total_eval$X4 <- as.numeric(R_UB_agg$x)
+names(total_eval) <- c("Years", "R_mean", "R_LB", "R_UB")
+
+write.csv(total_eval, "basecase1000_llogis.csv")
+
+```
+
+
+Plotting
+
+```{r}
+
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+total_eval2$Group[1:10]<- "R mean"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- R_agg$x
+
+total_eval2$Group[11:20]<- "R LB"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- R_LB_agg$x
+
+total_eval2$Group[21:30]<- "R UB"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- R_UB_agg$x
+
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(round(min(total_eval2$Value),2), 0, 0.25,0.43,0.73, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(min(total_eval2$Value), 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("Basecase2 loglogistic.jpeg")
+
+```
+
+
+
+#Function for scenario analyses
+
+```{r , include=FALSE}
+
+call_surrogacy_Cox <- function(SD_HbA1c_effect, beta, 
+n_studies, n_arm, tx, n_iterations, mean_HbA1c_effect, dist_Clarke, Clarke){
+
+set.seed(100)
+
+sim_Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+names(sim_Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+
+a <- 
+  foreach(iteration = 1: n_iterations, .combine = 'c', .options.RNG=123, .packages= c("survival", "wCorr", "metafor", "boot")) %dorng% {
+Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+
+#creation of the survival percentages for the patients in the trials
+pat1_iteration <- runif(n_arm*n_studies)
+pat2_iteration <- runif(n_arm*n_studies)
+
+for (duration in 1:10){
+
+results <- data.frame(matrix(ncol = 3, nrow = 0))
+
+for (trial in 1: n_studies){
+
+HbA1c_effect <- rnorm(1, mean_HbA1c_effect, SD_HbA1c_effect)
+ln_HR <- HbA1c_effect*beta
+
+#creation of the survival percentages for the patients in the trial
+#for all durations we use the same patients set up, so that fluctuations
+#are solely due to duration and not due to sampling new patients
+pat1 <- pat1_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+pat2 <- pat2_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+
+elt_Clarke1 <- trunc(pat1/dist_Clarke)+1
+Time_pat1 <- (pat1-Clarke[elt_Clarke1,1])/dist_Clarke*
+  (Clarke[elt_Clarke1+1,2]-Clarke[elt_Clarke1,2])+Clarke[elt_Clarke1,2]
+
+#Active arm -> first % to control 
+pat2_1 <- 1- (1-pat2)^(exp(-ln_HR))
+elt_Clarke2 <- trunc(pat2_1/dist_Clarke)+1
+Time_pat2 <- (pat2_1-Clarke[elt_Clarke2,1])/dist_Clarke*
+  (Clarke[elt_Clarke2+1,2]-Clarke[elt_Clarke2,2])+Clarke[elt_Clarke2,2]
+
+
+#if Time_pat < duration then death, otherwise censoring at duration
+cens_pat1 <- ifelse(Time_pat1 < duration, 0, 1)
+cens_pat2 <- ifelse(Time_pat2 < duration, 0, 1)
+
+Time_pat1 <- ifelse(Time_pat1 < duration, Time_pat1, duration)
+Time_pat2 <- ifelse(Time_pat2 < duration, Time_pat2, duration)
+
+data_Cox <- data.frame(time = c(Time_pat1, Time_pat2), 
+                       cens = c(cens_pat1, cens_pat2), tx )  
+
+
+#causing program to stop when something wrong is happening
+if(min(data_Cox$time) < 0){
+  print("time below 0")
+  Problem
+  return()
+}
+a <- coxph(Surv(data_Cox$time, 1-data_Cox$cens) ~ tx)
+
+results <- rbind(results, c(HbA1c_effect, a$coefficients, a$var))
+}
+
+
+    #Correlation. We use Pearson here as prediction is important. 
+    #weighted for 1/var
+    names(results) <- c("surrogate", "target", "target_var")
+    
+    boot.func <- function(dat, indices) {
+      data1=dat[indices,]
+      
+      res <- weightedCorr(
+        data1$surrogate,
+        data1$target,
+        method = "Pearson",
+        weights = 1/data1$target_var,
+        ML = FALSE,
+        fast = TRUE
+      )
+    }
+    
+    res.boot <- boot(results, boot.func, R=10000)  
+    
+    #Storing into overall-results for duration
+    Overall_results <- rbind(Overall_results, 
+                             c(duration, median(res.boot$t),
+                               quantile(res.boot$t, 0.025),
+                               quantile(res.boot$t, 0.975)))
+    
+}
+
+names(Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+sim_Overall_results <- rbind(sim_Overall_results, Overall_results)
+
+return(list(Overall_results$Duration, Overall_results$R, Overall_results[,3], Overall_results[,4]))
+
+}
+
+R <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R) <- c("Duration", "R")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R <- a[[2+4*(i-1)]]
+  R <- rbind(R, temp1)  
+}
+R_agg <-aggregate(R$R, list(R$Duration), mean)
+
+#Lower bound and upper bound here taken as mean as it is over simulations
+
+R_LB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_LB) <- c("Duration", "R_LB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_LB <- a[[3+4*(i-1)]]
+  R_LB <- rbind(R_LB, temp1)  
+}
+R_LB_agg <- aggregate(R_LB$R_LB, list(R_LB$Duration), mean)
+
+R_UB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_UB) <- c("Duration", "R_UB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_UB <- a[[4+4*(i-1)]]
+  R_UB <- rbind(R_UB, temp1)  
+}
+R_UB_agg <-aggregate(R_UB$R_UB, list(R_UB$Duration), mean)
+
+
+#Putting the numbers in one matrix
+total_eval <- data.frame(matrix(nrow = 10, ncol = 4))
+total_eval$X1 <- as.numeric(seq(1,10))
+total_eval$X2 <- as.numeric(R_agg$x)
+total_eval$X3 <- as.numeric(R_LB_agg$x)
+total_eval$X4 <- as.numeric(R_UB_agg$x)
+names(total_eval) <- c("Years", "R_mean", "R_LB", "R_UB")
+
+return(list(total_eval))
+}
+
+
+
+```
+
+
+
+#Variations SD
+
+SD 0.1
+
+```{r}
+SD_HbA1c_effect <- 0.1
+beta <- 1.18
+n_studies <- 19
+n_arm <- 7226/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+n_iterations <- 1000
+
+list1 <- call_surrogacy_Cox(SD_HbA1c_effect, beta, 
+n_studies, n_arm, tx, n_iterations, mean_HbA1c_effect, dist_Clarke, Clarke)
+
+meanR <- list1[[1]]
+
+write.csv(meanR, "SD01_mean.csv")
+
+```
+
+SD 0.5
+
+```{r}
+SD_HbA1c_effect <- 0.5
+beta <- 1.18
+n_studies <- 19
+n_arm <- 7226/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+n_iterations <- 1000
+
+list1 <- call_surrogacy_Cox(SD_HbA1c_effect, beta, 
+n_studies, n_arm, tx, n_iterations, mean_HbA1c_effect, dist_Clarke, Clarke)
+
+meanR <- list1[[1]]
+
+write.csv(meanR, "SD05_mean.csv")
+
+```
+
+
+Result are now in 
+SD05_mean.csv
+SD01_mean.csv
+basecase1000.csv
+
+Interest may be in both the mean R as well as the lower bound of R
+
+```{r}
+SD05_total_eval <- read.csv("SD05_mean.csv")
+SD01_total_eval <- read.csv("SD01_mean.csv")
+SD_base <- read.csv("basecase1000.csv")
+
+
+#plot for mean
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+total_eval2$Group[1:10]<- "R SD05"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- SD05_total_eval$R_mean
+
+total_eval2$Group[11:20]<- "R SD01"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- SD01_total_eval$R_mean
+
+total_eval2$Group[21:30]<- "R base"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- SD_base$R_mean
+
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Mean correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(round(min(total_eval2$Value),2), 0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(min(total_eval2$Value), 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("SD mean.jpeg")
+
+
+#plot for lower bound
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+total_eval2$Group[1:10]<- "R SD05"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- SD05_total_eval$R_LB
+
+total_eval2$Group[11:20]<- "R SD01"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- SD01_total_eval$R_LB
+
+total_eval2$Group[21:30]<- "R base"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- SD_base$R_LB
+
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Mean lower bound correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(round(min(total_eval2$Value),2), 0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(min(total_eval2$Value), 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("SD lower bound.jpeg")
+
+
+```
+
+
+#Variations beta
+
+beta is 1.18
+```{r}
+SD_HbA1c_effect <- 0.17
+beta <- 1.18
+n_studies <- 19
+n_arm <- 7226/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+n_iterations <- 1000
+
+list1 <- call_surrogacy_Cox(SD_HbA1c_effect, beta, 
+n_studies, n_arm, tx, n_iterations, mean_HbA1c_effect, dist_Clarke, Clarke)
+
+meanR <- list1[[1]]
+
+write.csv(meanR, "beta118_mean.csv")
+
+
+```
+
+beta 0.24
+```{r}
+SD_HbA1c_effect <- 0.17
+beta <- 0.24
+n_studies <- 19
+n_arm <- 7226/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+n_iterations <- 1000
+
+list1 <- call_surrogacy_Cox(SD_HbA1c_effect, beta, 
+n_studies, n_arm, tx, n_iterations, mean_HbA1c_effect, dist_Clarke, Clarke)
+
+meanR <- list1[[1]]
+
+write.csv(meanR, "beta24_mean.csv")
+
+
+```
+
+data is now in 
+
+beta24_mean.csv
+beta118_mean.csv
+basecase1000.csv
+
+Interest may be in both the mean R as well as the lower bound of R
+
+```{r}
+rm(SD05_total_eval) 
+rm(SD01_total_eval)
+
+beta24 <- read.csv("beta24_mean.csv")
+beta118 <- read.csv("beta118_mean.csv")
+SD_base <- read.csv("basecase1000.csv")
+
+#plot for mean
+
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+total_eval2$Group[1:10]<- "HR 0.90"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- beta24$R_mean
+
+total_eval2$Group[11:20]<- "HR 0.60"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- beta118$R_mean
+
+total_eval2$Group[21:30]<- "R base"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- SD_base$R_mean
+
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Mean correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(round(min(total_eval2$Value),2), 0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(min(total_eval2$Value), 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+
+ggsave("beta mean.jpeg")
+
+#plot for lower bound
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+total_eval2$Group[1:10]<- "R HR0.90"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- beta24$R_LB
+
+total_eval2$Group[11:20]<- "R HR0.6"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- beta118$R_LB
+
+total_eval2$Group[21:30]<- "R base"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- SD_base$R_LB
+
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Mean lower bound correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(round(min(total_eval2$Value),2), 0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(min(total_eval2$Value), 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("beta lower bound.jpeg")
+
+
+```
+
+
+#Variations number of studies
+
+n studies 50
+```{r}
+SD_HbA1c_effect <- 0.17
+beta <- 1.18
+n_studies <- 50
+n_arm <- 7226/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+n_iterations <- 1000
+
+list1 <- call_surrogacy_Cox(SD_HbA1c_effect, beta, 
+n_studies, n_arm, tx, n_iterations, mean_HbA1c_effect, dist_Clarke, Clarke)
+
+meanR <- list1[[1]]
+
+write.csv(meanR, "n_studies50_mean.csv")
+
+
+```
+
+
+n_studies 250
+```{r}
+SD_HbA1c_effect <- 0.17
+beta <- 1.18
+n_studies <- 250
+n_arm <- 7226/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+n_iterations <- 1000
+
+list1 <- call_surrogacy_Cox(SD_HbA1c_effect, beta, 
+n_studies, n_arm, tx, n_iterations, mean_HbA1c_effect, dist_Clarke, Clarke)
+
+meanR <- list1[[1]]
+
+write.csv(meanR, "n_studies250_mean.csv")
+
+```
+
+n studies 10
+```{r}
+SD_HbA1c_effect <- 0.17
+beta <- 1.18
+n_studies <- 10
+n_arm <- 7226/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+n_iterations <- 1000
+
+list1 <- call_surrogacy_Cox(SD_HbA1c_effect, beta, 
+n_studies, n_arm, tx, n_iterations, mean_HbA1c_effect, dist_Clarke, Clarke)
+
+meanR <- list1[[1]]
+
+write.csv(meanR, "n_studies10_mean.csv")
+
+
+```
+
+
+data are now in 
+
+n_studies50_mean.csv
+n_studies250_mean.csv
+basecase1000.csv
+
+Interest may be in both the mean R as well as the lower bound of R
+
+```{r}
+rm(beta24) 
+rm(beta118)
+
+nst10 <- read.csv("n_studies10_mean.csv")
+nst50 <- read.csv("n_studies50_mean.csv")
+nst250 <- read.csv("n_studies250_mean.csv")
+SD_base <- read.csv("basecase1000.csv")
+
+#plot for mean
+
+total_eval2 <- data.frame(matrix(nrow = 40, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+total_eval2$Group[1:10]<- "n studies 50"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- nst50$R_mean
+
+total_eval2$Group[11:20]<- "n studies 250"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- nst250$R_mean
+
+total_eval2$Group[21:30]<- "R base"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- SD_base$R_mean
+
+total_eval2$Group[31:40]<- "n studies 10"
+total_eval2$Duration[31:40]<- seq(1,10)
+total_eval2$Value[31:40]<- nst10$R_mean
+
+
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red","purple"))+
+    labs(title ="Mean correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(round(min(total_eval2$Value),2), 0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(min(total_eval2$Value), 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("number studies mean with 10.jpeg")
+
+
+#plot for lower bound
+total_eval2 <- data.frame(matrix(nrow = 40, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+total_eval2$Group[1:10]<- "n studies 50"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- nst50$R_LB
+
+total_eval2$Group[11:20]<- "n studies 250"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- nst250$R_LB
+
+total_eval2$Group[21:30]<- "R base"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- SD_base$R_LB
+
+total_eval2$Group[31:40]<- "n studies 10"
+total_eval2$Duration[31:40]<- seq(1,10)
+total_eval2$Value[31:40]<- nst10$R_LB
+
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red", "purple"))+
+    labs(title ="Mean lower bound correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(round(min(total_eval2$Value),2), 0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(min(total_eval2$Value), 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("number studies lower bound with 10.jpeg")
+
+```
+
+
+#Variations n_arm
+
+#Function for scenario analyses where problems are with no events
+
+```{r , include=FALSE}
+
+call_surrogacy_Cox_small <- function(SD_HbA1c_effect, beta, 
+n_studies, n_arm, tx, n_iterations, mean_HbA1c_effect, dist_Clarke, Clarke){
+
+set.seed(100)
+
+sim_Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+names(sim_Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+
+a <- 
+  foreach(iteration = 1: n_iterations, .combine = 'c', .options.RNG=123, .packages= c("survival", "wCorr", "metafor", "boot")) %dorng% {
+Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+
+#creation of the survival percentages for the patients in the trials
+pat1_iteration <- runif(n_arm*n_studies)
+pat2_iteration <- runif(n_arm*n_studies)
+
+for (duration in 1:10){
+
+results <- data.frame(matrix(ncol = 3, nrow = 0))
+
+for (trial in 1: n_studies){
+
+HbA1c_effect <- rnorm(1, mean_HbA1c_effect, SD_HbA1c_effect)
+ln_HR <- HbA1c_effect*beta
+
+#creation of the survival percentages for the patients in the trial
+#for all durations we use the same patients set up, so that fluctuations
+#are solely due to duration and not due to sampling new patients
+pat1 <- pat1_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+pat2 <- pat2_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+
+elt_Clarke1 <- trunc(pat1/dist_Clarke)+1
+Time_pat1 <- (pat1-Clarke[elt_Clarke1,1])/dist_Clarke*
+  (Clarke[elt_Clarke1+1,2]-Clarke[elt_Clarke1,2])+Clarke[elt_Clarke1,2]
+
+#Active arm -> first % to control 
+pat2_1 <- 1- (1-pat2)^(exp(-ln_HR))
+elt_Clarke2 <- trunc(pat2_1/dist_Clarke)+1
+Time_pat2 <- (pat2_1-Clarke[elt_Clarke2,1])/dist_Clarke*
+  (Clarke[elt_Clarke2+1,2]-Clarke[elt_Clarke2,2])+Clarke[elt_Clarke2,2]
+
+
+#if Time_pat < duration then death, otherwise censoring at duration
+cens_pat1 <- ifelse(Time_pat1 < duration, 0, 1)
+cens_pat2 <- ifelse(Time_pat2 < duration, 0, 1)
+
+Time_pat1 <- ifelse(Time_pat1 < duration, Time_pat1, duration)
+Time_pat2 <- ifelse(Time_pat2 < duration, Time_pat2, duration)
+
+data_Cox <- data.frame(time = c(Time_pat1, Time_pat2), 
+                       cens = c(cens_pat1, cens_pat2), tx )  
+
+
+#causing program to stop when something wrong is happening
+if(min(data_Cox$time) < 0){
+  print("time below 0")
+  Problem
+  return()
+}
+a <- coxph(Surv(data_Cox$time, 1-data_Cox$cens) ~ tx)
+
+results <- rbind(results, c(HbA1c_effect, a$coefficients, a$var))
+}
+
+    results <- na.omit(results)
+    #Correlation. We use Pearson here as prediction is important. 
+    #weighted for 1/var
+    names(results) <- c("surrogate", "target", "target_var")
+    
+    boot.func <- function(dat, indices) {
+      data1=dat[indices,]
+      
+      res <- weightedCorr(
+        data1$surrogate,
+        data1$target,
+        method = "Pearson",
+        weights = 1/data1$target_var,
+        ML = FALSE,
+        fast = TRUE
+      )
+    }
+    
+    res.boot <- boot(results, boot.func, R=10000)  
+    
+    #Storing into overall-results for duration
+    Overall_results <- rbind(Overall_results, 
+                             c(duration, median(res.boot$t),
+                               quantile(res.boot$t, 0.025),
+                               quantile(res.boot$t, 0.975)))
+    
+}
+
+names(Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+sim_Overall_results <- rbind(sim_Overall_results, Overall_results)
+
+return(list(Overall_results$Duration, Overall_results$R, Overall_results[,3], Overall_results[,4]))
+
+}
+
+R <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R) <- c("Duration", "R")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R <- a[[2+4*(i-1)]]
+  R <- rbind(R, temp1)  
+}
+R_agg <-aggregate(R$R, list(R$Duration), mean)
+
+#Lower bound and upper bound here taken as mean as it is over simulations
+
+R_LB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_LB) <- c("Duration", "R_LB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_LB <- a[[3+4*(i-1)]]
+  R_LB <- rbind(R_LB, temp1)  
+}
+R_LB_agg <- aggregate(R_LB$R_LB, list(R_LB$Duration), mean)
+
+R_UB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_UB) <- c("Duration", "R_UB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_UB <- a[[4+4*(i-1)]]
+  R_UB <- rbind(R_UB, temp1)  
+}
+R_UB_agg <-aggregate(R_UB$R_UB, list(R_UB$Duration), mean)
+
+
+#Putting the numbers in one matrix
+total_eval <- data.frame(matrix(nrow = 10, ncol = 4))
+total_eval$X1 <- as.numeric(seq(1,10))
+total_eval$X2 <- as.numeric(R_agg$x)
+total_eval$X3 <- as.numeric(R_LB_agg$x)
+total_eval$X4 <- as.numeric(R_UB_agg$x)
+names(total_eval) <- c("Years", "R_mean", "R_LB", "R_UB")
+
+return(list(total_eval))
+}
+
+
+
+```
+
+
+
+1000 patients per trial
+```{r}
+SD_HbA1c_effect <- 0.17
+beta <- 1.18
+n_studies <- 19
+n_arm <- 1000/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+n_iterations <- 1000
+
+list1 <- call_surrogacy_Cox_small(SD_HbA1c_effect, beta, 
+n_studies, n_arm, tx, n_iterations, mean_HbA1c_effect, dist_Clarke, Clarke)
+
+meanR <- list1[[1]]
+
+write.csv(meanR, "n_pat1000_mean.csv")
+
+```
+10000 patients per trial
+```{r}
+SD_HbA1c_effect <- 0.17
+beta <- 1.18
+n_studies <- 19
+n_arm <- 10000/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+n_iterations <- 1000
+
+list1 <- call_surrogacy_Cox(SD_HbA1c_effect, beta, 
+n_studies, n_arm, tx, n_iterations, mean_HbA1c_effect, dist_Clarke, Clarke)
+
+meanR <- list1[[1]]
+
+write.csv(meanR, "n_pat10000_mean.csv")
+
+```
+
+data are now in 
+n_pat10000_mean.csv
+n_pat1000_mean.csv
+basecase1000.csv
+
+Interest may be in both the mean R as well as the lower bound of R
+
+```{r}
+rm(nst50) 
+rm(nst250)
+
+trial1000 <- read.csv("n_pat1000_mean.csv")
+trial10000 <- read.csv("n_pat10000_mean.csv")
+SD_base <- read.csv("basecase1000.csv")
+
+#plot for mean
+
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+total_eval2$Group[1:10]<- "n study size 1,000"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- trial1000$R_mean
+
+total_eval2$Group[11:20]<- "n study size 10,000"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- trial10000$R_mean
+
+total_eval2$Group[21:30]<- "R base"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- SD_base$R_mean
+
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Mean correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(round(min(total_eval2$Value),2), 0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(min(total_eval2$Value), 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("number arm mean.jpeg")
+
+
+#plot for lower bound
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+total_eval2$Group[11:20]<- "n study size 1,000"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- trial1000$R_LB
+
+total_eval2$Group[1:10]<- "n study size 10,000"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- trial10000$R_LB
+
+total_eval2$Group[21:30]<- "R base"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- SD_base$R_LB
+
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Mean lower bound correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(round(min(total_eval2$Value),2), 0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(min(total_eval2$Value), 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("number arm lower bound.jpeg")
+
+```
+
+#Variations R squared
+
+function
+
+```{r , include=FALSE}
+
+#evaluation from 1 to 10 years
+call_surrogacy_Cox_varR <- function(SD_HbA1c_effect, beta, 
+n_studies, n_arm, tx, n_iterations, mean_HbA1c_effect, dist_Clarke, Clarke, R_squared){
+
+set.seed(100)
+
+sim_Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+names(sim_Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+
+a <- 
+  foreach(iteration = 1: n_iterations, .combine = 'c', .options.RNG=123, .packages= c("survival", "wCorr", "metafor", "boot")) %dorng% {
+
+Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+
+#creation of the survival percentages for the patients in the trials
+pat1_iteration <- runif(n_arm*n_studies)
+pat2_iteration <- runif(n_arm*n_studies)
+
+for (duration in 1:10){
+
+results <- data.frame(matrix(ncol = 3, nrow = 0))
+
+for (trial in 1: n_studies){
+
+HbA1c_effect <- rnorm(1, mean_HbA1c_effect, SD_HbA1c_effect)
+var_epsilon <- beta^2*SD_HbA1c_effect^2*(1-R_squared)/R_squared
+error <- rnorm(1,0, sqrt(var_epsilon))
+
+ln_HR <- HbA1c_effect*beta +error
+#creation of the survival percentages for the patients in the trial
+#for all durations we use the same patients set up, so that fluctuations
+#are solely due to duration and not due to sampling new patients
+pat1 <- pat1_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+pat2 <- pat2_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+
+#model to come from percentage to time:
+elt_Clarke1 <- trunc(pat1/dist_Clarke)+1
+Time_pat1 <- (pat1-Clarke[elt_Clarke1,1])/dist_Clarke*
+  (Clarke[elt_Clarke1+1,2]-Clarke[elt_Clarke1,2])+Clarke[elt_Clarke1,2]
+
+#Active arm -> first % to control 
+pat2_1 <- 1- (1-pat2)^(exp(-ln_HR))
+elt_Clarke2 <- trunc(pat2_1/dist_Clarke)+1
+Time_pat2 <- (pat2_1-Clarke[elt_Clarke2,1])/dist_Clarke*
+  (Clarke[elt_Clarke2+1,2]-Clarke[elt_Clarke2,2])+Clarke[elt_Clarke2,2]
+
+
+#if Time_pat < duration then death, otherwise censoring at duration
+
+cens_pat1 <- ifelse(Time_pat1 < duration, 0, 1)
+cens_pat2 <- ifelse(Time_pat2 < duration, 0, 1)
+
+Time_pat1 <- ifelse(Time_pat1 < duration, Time_pat1, duration)
+Time_pat2 <- ifelse(Time_pat2 < duration, Time_pat2, duration)
+
+data_Cox <- data.frame(time = c(Time_pat1, Time_pat2), 
+                       cens = c(cens_pat1, cens_pat2), tx )  
+
+#causing program to stop when something goes wrong
+if(min(data_Cox$time) < 0){
+  print("time below 0")
+  Problem
+  return()
+}
+
+a <- coxph(Surv(data_Cox$time, 1-data_Cox$cens) ~ tx)
+
+results <- rbind(results, c(HbA1c_effect, a$coefficients, a$var))
+}
+
+    #Correlation. We use Pearson here as prediction is important. 
+    #weighted for 1/var
+    names(results) <- c("surrogate", "target", "target_var")
+    
+    boot.func <- function(dat, indices) {
+      data1=dat[indices,]
+      
+      res <- weightedCorr(
+        data1$surrogate,
+        data1$target,
+        method = "Pearson",
+        weights = 1/data1$target_var,
+        ML = FALSE,
+        fast = TRUE
+      )
+    }
+    
+    res.boot <- boot(results, boot.func, R=10000)  
+    
+    #Storing into overall-results for duration
+    Overall_results <- rbind(Overall_results, 
+                             c(duration, median(res.boot$t),
+                               quantile(res.boot$t, 0.025),
+                               quantile(res.boot$t, 0.975)))
+    
+}
+
+names(Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+sim_Overall_results <- rbind(sim_Overall_results, Overall_results)
+return(list(Overall_results$Duration, Overall_results$R, Overall_results[,3], Overall_results[,4]))
+
+}
+
+R <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R) <- c("Duration", "R")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R <- a[[2+4*(i-1)]]
+  R <- rbind(R, temp1)  
+}
+R_agg <-aggregate(R$R, list(R$Duration), mean)
+
+#Lower bound and upper bound here taken as mean as it is over simulations
+
+R_LB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_LB) <- c("Duration", "R_LB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_LB <- a[[3+4*(i-1)]]
+  R_LB <- rbind(R_LB, temp1)  
+}
+R_LB_agg <- aggregate(R_LB$R_LB, list(R_LB$Duration), mean)
+
+R_UB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_UB) <- c("Duration", "R_UB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_UB <- a[[4+4*(i-1)]]
+  R_UB <- rbind(R_UB, temp1)  
+}
+R_UB_agg <-aggregate(R_UB$R_UB, list(R_UB$Duration), mean)
+
+#Putting the numbers in one matrix
+total_eval <- data.frame(matrix(nrow = 10, ncol = 4))
+total_eval$X1 <- as.numeric(seq(1,10))
+total_eval$X2 <- as.numeric(R_agg$x)
+total_eval$X3 <- as.numeric(R_LB_agg$x)
+total_eval$X4 <- as.numeric(R_UB_agg$x)
+names(total_eval) <- c("Years", "R_mean", "R_LB", "R_UB")
+
+return(list(total_eval))
+}
+
+
+```
+
+
+R squared 0.9
+```{r}
+SD_HbA1c_effect <- 0.17
+beta <- 1.18
+n_studies <- 19
+n_arm <- 7662/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+n_iterations <- 1000
+R_squared<- 0.90
+
+list1 <- call_surrogacy_Cox_varR(SD_HbA1c_effect, beta, 
+n_studies, n_arm, tx, n_iterations, mean_HbA1c_effect, dist_Clarke, Clarke, R_squared)
+
+meanR <- list1[[1]]
+
+write.csv(meanR, "Rsquared90_mean.csv")
+
+```
+
+
+R squared 0.8
+```{r}
+SD_HbA1c_effect <- 0.17
+beta <- 1.18
+n_studies <- 19
+n_arm <- 7662/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+n_iterations <- 1000
+R_squared<- 0.80
+
+list1 <- call_surrogacy_Cox_varR(SD_HbA1c_effect, beta, 
+n_studies, n_arm, tx, n_iterations, mean_HbA1c_effect, dist_Clarke, Clarke, R_squared)
+
+meanR <- list1[[1]]
+
+write.csv(meanR, "Rsquared80_mean.csv")
+
+```
+
+data are now in
+
+Rsquared90_mean.csv
+Rsquared80_mean.csv
+basecase1000.csv
+
+Interest may be in both the mean R as well as the lower bound of R
+
+```{r}
+rm(trial1000) 
+rm(trial10000)
+
+R2_90 <- read.csv("Rsquared90_mean.csv")
+R2_80 <- read.csv("Rsquared80_mean.csv")
+SD_base <- read.csv("basecase1000.csv")
+
+#plot for mean
+
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+total_eval2$Group[1:10]<- "R squared 0.90"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- R2_90$R_mean
+
+total_eval2$Group[11:20]<- "R squared 0.80"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- R2_80$R_mean
+
+total_eval2$Group[21:30]<- "R base"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- SD_base$R_mean
+
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Mean correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(round(min(total_eval2$Value),2), 0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(min(total_eval2$Value), 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("R squared mean.jpeg")
+
+
+#plot for lower bound
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+total_eval2$Group[1:10]<- "R squared 0.90"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- R2_90$R_LB
+
+total_eval2$Group[11:20]<- "R squared 0.80"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- R2_80$R_LB
+
+total_eval2$Group[21:30]<- "R base"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- SD_base$R_LB
+
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Mean lower bound correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(round(min(total_eval2$Value),2), 0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(min(total_eval2$Value), 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("R squared LB.jpeg")
+
+
+```
+
+
+#One year survival percentage 
+10%
+25%
+50%
+75%
+90%
+
+```{r}
+
+#Percentage at 1 from Clarke to 10%
+#Exact percentage at 1:
+row_1 <- sum(Time<1)
+perc_1 <- (1-Time[row_1])/(Time[row_1+1]-Time[row_1])*
+(Cum_death[row_1+1]-Cum_death[row_1])+Cum_death[row_1]
+
+#HR for 10%: 
+HR10 <- log(.90)/log(1-perc_1)
+1- (1-perc_1)^HR10
+HR25 <- log(.75)/log(1-perc_1)
+1- (1-perc_1)^HR25
+HR50 <- log(.50)/log(1-perc_1)
+1- (1-perc_1)^HR50
+HR75 <- log(.25)/log(1-perc_1)
+1- (1-perc_1)^HR75
+HR90 <- log(.10)/log(1-perc_1)
+1- (1-perc_1)^HR90
+
+Cum_death10 <- 1-(1-Cum_death)^HR10
+Cum_death25 <- 1-(1-Cum_death)^HR25
+Cum_death50 <- 1-(1-Cum_death)^HR50
+Cum_death75 <- 1-(1-Cum_death)^HR75
+Cum_death90 <- 1-(1-Cum_death)^HR90
+
+#Figure
+plot_perc <- data.frame(matrix(nrow = 0, ncol = 3))
+names(plot_perc) <- c("Time", "Death", "group")
+Cum_death_group <- data.frame(matrix(nrow = length(Cum_death), ncol = 1))
+names(Cum_death_group) <- "group"
+Cum_death_group$group <- "Clarke"
+Cum_death_group$group <- as.character(Cum_death_group$group)
+plot_perc <- rbind(plot_perc, cbind(Time, Cum_death, Cum_death_group$group))
+names(plot_perc)[3] <- "group"
+
+mat10 <- data.frame(matrix(nrow = 36, ncol = 3))
+names(mat10)<- names(plot_perc)
+mat10[,1] <- Time
+mat10[,2] <- Cum_death10
+mat10[,3] <- "One year 10%"
+plot_perc <- rbind(plot_perc, mat10)
+
+mat25 <- mat10
+mat25[,2] <- Cum_death25
+mat25[,3] <- "One year 25%"
+plot_perc <- rbind(plot_perc, mat25)
+
+mat50 <- mat10
+mat50[,2] <- Cum_death50
+mat50[,3] <- "One year 50%"
+plot_perc <- rbind(plot_perc, mat50)
+  
+mat75 <- mat10
+mat75[,2] <- Cum_death75
+mat75[,3] <- "One year 75%"
+plot_perc <- rbind(plot_perc, mat75)
+
+mat90 <- mat10
+mat90[,2] <- Cum_death90
+mat90[,3] <- "One year 90%"
+plot_perc <- rbind(plot_perc, mat90)
+
+cpb2 <- c("#000000", "#E69F00", "#56B4E9", "#009E73",
+          "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+plot_perc$S <- 1 - as.numeric(plot_perc$Cum_death)
+plot_perc$group <- as.character(plot_perc$group)
+plot_perc$S <- as.numeric(plot_perc$S)
+plot_perc$Time <- as.numeric(plot_perc$Time)
+
+a <- ggplot(plot_perc
+, aes(Time, S,colour=group, size = group, type = group)) + 
+  geom_line(aes(linetype=group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=cpb2)+
+    labs(title ="Survival percentages")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("twodash","solid","longdash","dotted","dotdash","dashed"))+
+  labs(y="Survival percentage")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(0, 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("Survival percentages.jpeg")
+
+```
+
+
+#For 10
+
+```{r , include=FALSE}
+
+
+Clarke <- data.frame(matrix(nrow = 10000, ncol = 2))
+for(i in 1: 10000){
+
+  start_d <- sum(Cum_death10 < i/10000)
+  if (start_d>0){ 
+  Clarke[i,1] <- i/10000
+  Clarke[i,2] <- 
+  (i/10000 - Cum_death10[start_d])/(Cum_death10[start_d+1]-Cum_death10[start_d])*
+  (Time[start_d+1]-Time[start_d])+Time[start_d]
+  }
+  if (start_d == 0){
+  Clarke[i,1] <- i/10000
+  Clarke[i,2] <- 
+  (i/10000)/(Cum_death10[1])*(Time[1])
+  
+  }
+  
+}
+plot(Clarke[,1], Clarke[,2])
+
+dist_Clarke <- Clarke[2,1] - Clarke[1,1]
+Clarke[,2]<-ifelse(is.na(Clarke[,2]), 1000, Clarke[,2])
+Clarke <- rbind(c(0,0), Clarke)
+#For computational simplicity
+Clarke <- rbind(Clarke, c(1.1,1000))
+
+set.seed(100)
+
+#Rivera paper 
+mean_HbA1c_effect <- -0.43
+SD_HbA1c_effect <- 0.17
+n_studies <- 19
+#number per arm -> we assume equal studies in sample size
+n_arm <- 7226/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+n_iterations <- 1000
+
+#to have HR 0.8 as a mid point
+beta <- 1.18
+
+#dataset in which the results will be stored per duration
+sim_Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+names(sim_Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+
+a <- 
+  foreach(iteration = 1: n_iterations, .combine = 'c', .options.RNG=123, .packages= c("survival", "wCorr", "metafor", "boot")) %dorng% {
+#empty matrix in which the iterations results will be stored
+
+Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+
+#creation of the survival percentages for the patients in the trials
+pat1_iteration <- runif(n_arm*n_studies)
+pat2_iteration <- runif(n_arm*n_studies)
+
+
+#evaluation from 1 to 10 year
+for (duration in 1:10){
+
+#empty dataset to store results in for the 10 durations
+results <- data.frame(matrix(ncol = 3, nrow = 0))
+
+#creating trials
+for (trial in 1: n_studies){
+
+#HbA1c effect from normal distribution
+HbA1c_effect <- rnorm(1, mean_HbA1c_effect, SD_HbA1c_effect)
+
+#Mapping from HbA1c to underlying HR 
+ln_HR <- HbA1c_effect*beta
+
+#creation of the survival percentages for the patients in the trial
+#for all durations we use the same patients set up, so that fluctuations
+#are solely due to duration and not due to sampling new patients
+pat1 <- pat1_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+pat2 <- pat2_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+
+
+#From percentage to time:
+elt_Clarke1 <- trunc(pat1/dist_Clarke)+1
+Time_pat1 <- (pat1-Clarke[elt_Clarke1,1])/dist_Clarke*
+  (Clarke[elt_Clarke1+1,2]-Clarke[elt_Clarke1,2])+Clarke[elt_Clarke1,2]
+
+#Active arm -> first % to control 
+pat2_1 <- 1- (1-pat2)^(exp(-ln_HR))
+elt_Clarke2 <- trunc(pat2_1/dist_Clarke)+1
+
+Time_pat2 <- (pat2_1-Clarke[elt_Clarke2,1])/dist_Clarke*
+  (Clarke[elt_Clarke2+1,2]-Clarke[elt_Clarke2,2])+Clarke[elt_Clarke2,2]
+
+
+#if Time_pat < duration then death, otherwise censoring at duration
+cens_pat1 <- ifelse(Time_pat1 < duration, 0, 1)
+cens_pat2 <- ifelse(Time_pat2 < duration, 0, 1)
+
+Time_pat1 <- ifelse(Time_pat1 < duration, Time_pat1, duration)
+Time_pat2 <- ifelse(Time_pat2 < duration, Time_pat2, duration)
+
+data_Cox <- data.frame(time = c(Time_pat1, Time_pat2), 
+                       cens = c(cens_pat1, cens_pat2), tx )  
+
+#causing program to stop when something wrong is happening
+if(min(data_Cox$time) < 0){
+  print("time below 0")
+  Problem
+  return()
+}
+
+#Cox model
+a <- coxph(Surv(data_Cox$time, 1-data_Cox$cens) ~ tx)
+
+results <- rbind(results, c(HbA1c_effect, a$coefficients, a$var))
+}
+    #Correlation. We use Pearson here as prediction is important. 
+    #weighted for 1/var
+    names(results) <- c("surrogate", "target", "target_var")
+    
+    boot.func <- function(dat, indices) {
+      data1=dat[indices,]
+      
+      res <- weightedCorr(
+        data1$surrogate,
+        data1$target,
+        method = "Pearson",
+        weights = 1/data1$target_var,
+        ML = FALSE,
+        fast = TRUE
+      )
+    }
+    
+    res.boot <- boot(results, boot.func, R=10000)  
+    
+    #Storing into overall-results for duration
+    Overall_results <- rbind(Overall_results, 
+                             c(duration, median(res.boot$t),
+                               quantile(res.boot$t, 0.025),
+                               quantile(res.boot$t, 0.975)))
+    
+}
+
+#storing into data for the iterations
+names(Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+sim_Overall_results <- rbind(sim_Overall_results, Overall_results)
+return(list(Overall_results$Duration, Overall_results$R, Overall_results[,3], Overall_results[,4]))
+
+}
+
+
+R <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R) <- c("Duration", "R")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R <- a[[2+4*(i-1)]]
+  R <- rbind(R, temp1)  
+}
+R_agg <-aggregate(R$R, list(R$Duration), mean)
+
+#Lower bound and upper bound here taken as mean as it is over simulations
+
+R_LB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_LB) <- c("Duration", "R_LB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_LB <- a[[3+4*(i-1)]]
+  R_LB <- rbind(R_LB, temp1)  
+}
+R_LB_agg <- aggregate(R_LB$R_LB, list(R_LB$Duration), mean)
+
+R_UB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_UB) <- c("Duration", "R_UB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_UB <- a[[4+4*(i-1)]]
+  R_UB <- rbind(R_UB, temp1)  
+}
+R_UB_agg <-aggregate(R_UB$R_UB, list(R_UB$Duration), mean)
+
+
+#Putting the numbers in one matrix
+total_eval <- data.frame(matrix(nrow = 10, ncol = 4))
+total_eval$X1 <- as.numeric(seq(1,10))
+total_eval$X2 <- as.numeric(R_agg$x)
+total_eval$X3 <- as.numeric(R_LB_agg$x)
+total_eval$X4 <- as.numeric(R_UB_agg$x)
+names(total_eval) <- c("Years", "R_mean", "R_LB", "R_UB")
+
+write.csv(total_eval, "One_year_10.csv")
+
+```
+
+```{r}
+
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+total_eval2$Group[1:10]<- "R mean"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- R_agg$x
+
+total_eval2$Group[11:20]<- "R LB"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- R_LB_agg$x
+
+total_eval2$Group[21:30]<- "R UB"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- R_UB_agg$x
+
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(0, 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("Ten percent.jpeg")
+
+
+```
+
+
+#For 25
+
+```{r , include=FALSE}
+
+Clarke <- data.frame(matrix(nrow = 10000, ncol = 2))
+for(i in 1: 10000){
+
+  start_d <- sum(Cum_death25 < i/10000)
+  if (start_d>0){ 
+  Clarke[i,1] <- i/10000
+  Clarke[i,2] <- 
+  (i/10000 - Cum_death25[start_d])/(Cum_death25[start_d+1]-Cum_death25[start_d])*
+  (Time[start_d+1]-Time[start_d])+Time[start_d]
+  }
+  if (start_d == 0){
+  Clarke[i,1] <- i/10000
+  Clarke[i,2] <- 
+  (i/10000)/(Cum_death25[1])*(Time[1])
+  
+  }
+  
+}
+plot(Clarke[,2], 1-Clarke[,1])
+
+dist_Clarke <- Clarke[2,1] - Clarke[1,1]
+
+Clarke[,2]<-ifelse(is.na(Clarke[,2]), 1000, Clarke[,2])
+Clarke <- rbind(c(0,0), Clarke)
+#For computational simplicity
+Clarke <- rbind(Clarke, c(1.1,1000))
+set.seed(100)
+
+#Rivera paper 
+mean_HbA1c_effect <- -0.43
+SD_HbA1c_effect <- 0.17
+n_studies <- 19
+#number per arm -> we assume equal studies in sample size
+n_arm <- 7226/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+
+#to have HR 0.8 as a mid point
+beta <- 1.18
+
+#evaluation from 1 to 10 years
+
+#dataset in which the results will be stored per duration
+sim_Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+names(sim_Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+
+a <- 
+  foreach(iteration = 1: n_iterations, .combine = 'c', .options.RNG=123, .packages= c("survival", "wCorr", "metafor", "boot")) %dorng% {
+
+#creation of the survival percentages for the patients in the trials
+pat1_iteration <- runif(n_arm*n_studies)
+pat2_iteration <- runif(n_arm*n_studies)
+  
+  
+#empty matrix in which the iterations results will be stored
+Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+
+#evaluation from 1 to 10 year
+for (duration in 1:10){
+
+#empty dataset to store results in for the 10 durations
+results <- data.frame(matrix(ncol = 3, nrow = 0))
+
+#creating trials
+for (trial in 1: n_studies){
+
+#HbA1c effect from normal distribution
+HbA1c_effect <- rnorm(1, mean_HbA1c_effect, SD_HbA1c_effect)
+
+#Mapping from HbA1c to underlying HR 
+ln_HR <- HbA1c_effect*beta
+
+#creation of the survival percentages for the patients in the trial
+#for all durations we use the same patients set up, so that fluctuations
+#are solely due to duration and not due to sampling new patients
+pat1 <- pat1_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+pat2 <- pat2_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+
+
+#From percentage to time:
+elt_Clarke1 <- trunc(pat1/dist_Clarke)+1
+Time_pat1 <- (pat1-Clarke[elt_Clarke1,1])/dist_Clarke*
+  (Clarke[elt_Clarke1+1,2]-Clarke[elt_Clarke1,2])+Clarke[elt_Clarke1,2]
+
+#Active arm -> first % to control 
+pat2_1 <- 1- (1-pat2)^(exp(-ln_HR))
+elt_Clarke2 <- trunc(pat2_1/dist_Clarke)+1
+Time_pat2 <- (pat2_1-Clarke[elt_Clarke2,1])/dist_Clarke*
+  (Clarke[elt_Clarke2+1,2]-Clarke[elt_Clarke2,2])+Clarke[elt_Clarke2,2]
+
+#if Time_pat < duration then death, otherwise censoring at duration
+cens_pat1 <- ifelse(Time_pat1 < duration, 0, 1)
+cens_pat2 <- ifelse(Time_pat2 < duration, 0, 1)
+
+Time_pat1 <- ifelse(Time_pat1 < duration, Time_pat1, duration)
+Time_pat2 <- ifelse(Time_pat2 < duration, Time_pat2, duration)
+
+data_Cox <- data.frame(time = c(Time_pat1, Time_pat2), 
+                       cens = c(cens_pat1, cens_pat2), tx )  
+
+
+#causing program to stop when something wrong is happening
+if(min(data_Cox$time) < 0){
+  print("time below 0")
+  Problem
+  return()
+}
+
+a <- coxph(Surv(data_Cox$time, 1-data_Cox$cens) ~ tx)
+
+results <- rbind(results, c(HbA1c_effect, a$coefficients, a$var))
+}
+
+    #Correlation. We use Pearson here as prediction is important. 
+    #weighted for 1/var
+    names(results) <- c("surrogate", "target", "target_var")
+    
+    boot.func <- function(dat, indices) {
+      data1=dat[indices,]
+      
+      res <- weightedCorr(
+        data1$surrogate,
+        data1$target,
+        method = "Pearson",
+        weights = 1/data1$target_var,
+        ML = FALSE,
+        fast = TRUE
+      )
+    }
+    
+    res.boot <- boot(results, boot.func, R=10000)  
+    
+    #Storing into overall-results for duration
+    Overall_results <- rbind(Overall_results, 
+                             c(duration, median(res.boot$t),
+                               quantile(res.boot$t, 0.025),
+                               quantile(res.boot$t, 0.975)))
+    
+}
+
+#storing into data for the terations
+names(Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+sim_Overall_results <- rbind(sim_Overall_results, Overall_results)
+return(list(Overall_results$Duration, Overall_results$R, Overall_results[,3], Overall_results[,4]))
+
+}
+
+
+R <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R) <- c("Duration", "R")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R <- a[[2+4*(i-1)]]
+  R <- rbind(R, temp1)  
+}
+R_agg <-aggregate(R$R, list(R$Duration), mean)
+
+#Lower bound and upper bound here taken as mean as it is over simulations
+
+R_LB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_LB) <- c("Duration", "R_LB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_LB <- a[[3+4*(i-1)]]
+  R_LB <- rbind(R_LB, temp1)  
+}
+R_LB_agg <- aggregate(R_LB$R_LB, list(R_LB$Duration), mean)
+
+R_UB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_UB) <- c("Duration", "R_UB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_UB <- a[[4+4*(i-1)]]
+  R_UB <- rbind(R_UB, temp1)  
+}
+R_UB_agg <-aggregate(R_UB$R_UB, list(R_UB$Duration), mean)
+
+
+#Putting the numbers in one matrix
+total_eval <- data.frame(matrix(nrow = 10, ncol = 4))
+total_eval$X1 <- as.numeric(seq(1,10))
+total_eval$X2 <- as.numeric(R_agg$x)
+total_eval$X3 <- as.numeric(R_LB_agg$x)
+total_eval$X4 <- as.numeric(R_UB_agg$x)
+names(total_eval) <- c("Years", "R_mean", "R_LB", "R_UB")
+
+write.csv(total_eval, "One_year25.csv")
+
+```
+
+```{r}
+
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+total_eval2$Group[1:10]<- "R mean"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- R_agg$x
+
+total_eval2$Group[11:20]<- "R LB"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- R_LB_agg$x
+
+total_eval2$Group[21:30]<- "R UB"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- R_UB_agg$x
+
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(0, 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("Twentyfive percent.jpeg")
+
+
+```
+
+
+
+#For 50
+
+
+
+```{r , include=FALSE}
+
+Clarke <- data.frame(matrix(nrow = 10000, ncol = 2))
+for(i in 1: 10000){
+
+  start_d <- sum(Cum_death50 < i/10000)
+  if (start_d>0){ 
+  Clarke[i,1] <- i/10000
+  Clarke[i,2] <- 
+  (i/10000 - Cum_death50[start_d])/(Cum_death50[start_d+1]-Cum_death50[start_d])*
+  (Time[start_d+1]-Time[start_d])+Time[start_d]
+  }
+  if (start_d == 0){
+  Clarke[i,1] <- i/10000
+  Clarke[i,2] <- 
+  (i/10000)/(Cum_death50[1])*(Time[1])
+  
+  }
+  
+}
+plot(Clarke[,2], 1-Clarke[,1])
+
+dist_Clarke <- Clarke[2,1] - Clarke[1,1]
+Clarke[,2]<-ifelse(is.na(Clarke[,2]), 1000, Clarke[,2])
+
+
+Clarke <- rbind(c(0,0), Clarke)
+#For computational simplicity
+Clarke <- rbind(Clarke, c(1.1,1000))
+set.seed(100)
+
+#Rivera paper 
+mean_HbA1c_effect <- -0.43
+SD_HbA1c_effect <- 0.17
+n_studies <- 19
+#number per arm -> we assume equal studies in sample size
+n_arm <- 7226/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+
+#to have HR 0.8 as a mid point
+beta <- 1.18
+
+#evaluation from 1 to 10 years
+
+#dataset in which the results will be stored per duration
+sim_Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+names(sim_Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+
+a <- 
+  foreach(iteration = 1: n_iterations, .combine = 'c', .options.RNG=123, .packages= c("survival", "wCorr", "metafor", "boot")) %dorng% {
+#empty matrix in which the iterations results will be stored
+Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+
+#creation of the survival percentages for the patients in the trials
+pat1_iteration <- runif(n_arm*n_studies)
+pat2_iteration <- runif(n_arm*n_studies)
+
+
+#evaluation from 1 to 10 year
+for (duration in 1:10){
+
+#empty dataset to store results in for the 10 durations
+results <- data.frame(matrix(ncol = 3, nrow = 0))
+
+#creating trials
+for (trial in 1: n_studies){
+
+#HbA1c effect from normal distribution
+HbA1c_effect <- rnorm(1, mean_HbA1c_effect, SD_HbA1c_effect)
+
+#Mapping from HbA1c to underlying HR 
+ln_HR <- HbA1c_effect*beta
+
+#creation of the survival percentages for the patients in the trial
+#for all durations we use the same patients set up, so that fluctuations
+#are solely due to duration and not due to sampling new patients
+pat1 <- pat1_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+pat2 <- pat2_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+
+
+#From percentage to time:
+elt_Clarke1 <- trunc(pat1/dist_Clarke)+1
+Time_pat1 <- (pat1-Clarke[elt_Clarke1,1])/dist_Clarke*
+  (Clarke[elt_Clarke1+1,2]-Clarke[elt_Clarke1,2])+Clarke[elt_Clarke1,2]
+
+#Active arm -> first % to control 
+pat2_1 <- 1- (1-pat2)^(exp(-ln_HR))
+elt_Clarke2 <- trunc(pat2_1/dist_Clarke)+1
+Time_pat2 <- (pat2_1-Clarke[elt_Clarke2,1])/dist_Clarke*
+  (Clarke[elt_Clarke2+1,2]-Clarke[elt_Clarke2,2])+Clarke[elt_Clarke2,2]
+
+#if Time_pat < duration then death, otherwise censoring at duration
+cens_pat1 <- ifelse(Time_pat1 < duration, 0, 1)
+cens_pat2 <- ifelse(Time_pat2 < duration, 0, 1)
+
+Time_pat1 <- ifelse(Time_pat1 < duration, Time_pat1, duration)
+Time_pat2 <- ifelse(Time_pat2 < duration, Time_pat2, duration)
+
+data_Cox <- data.frame(time = c(Time_pat1, Time_pat2), 
+                       cens = c(cens_pat1, cens_pat2), tx )  
+
+#causing program to stop when something wrong is happening
+if(min(data_Cox$time) < 0){
+  print("time below 0")
+  Problem
+  return()
+}
+
+a <- coxph(Surv(data_Cox$time, 1-data_Cox$cens) ~ tx)
+
+results <- rbind(results, c(HbA1c_effect, a$coefficients, a$var))
+}
+
+  
+    #Correlation. We use Pearson here as prediction is important. 
+    #weighted for 1/var
+    names(results) <- c("surrogate", "target", "target_var")
+    
+    boot.func <- function(dat, indices) {
+      data1=dat[indices,]
+      
+      res <- weightedCorr(
+        data1$surrogate,
+        data1$target,
+        method = "Pearson",
+        weights = 1/data1$target_var,
+        ML = FALSE,
+        fast = TRUE
+      )
+    }
+    
+    res.boot <- boot(results, boot.func, R=10000)  
+    
+    #Storing into overall-results for duration
+    Overall_results <- rbind(Overall_results, 
+                             c(duration, median(res.boot$t),
+                               quantile(res.boot$t, 0.025),
+                               quantile(res.boot$t, 0.975)))
+    
+}
+
+#storing into data for the iterations
+names(Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+sim_Overall_results <- rbind(sim_Overall_results, Overall_results)
+return(list(Overall_results$Duration, Overall_results$R, Overall_results[,3], Overall_results[,4]))
+
+}
+
+
+R <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R) <- c("Duration", "R")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R <- a[[2+4*(i-1)]]
+  R <- rbind(R, temp1)  
+}
+R_agg <-aggregate(R$R, list(R$Duration), mean)
+
+#Lower bound and upper bound here taken as mean as it is over simulations
+
+R_LB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_LB) <- c("Duration", "R_LB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_LB <- a[[3+4*(i-1)]]
+  R_LB <- rbind(R_LB, temp1)  
+}
+R_LB_agg <- aggregate(R_LB$R_LB, list(R_LB$Duration), mean)
+
+R_UB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_UB) <- c("Duration", "R_UB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_UB <- a[[4+4*(i-1)]]
+  R_UB <- rbind(R_UB, temp1)  
+}
+R_UB_agg <-aggregate(R_UB$R_UB, list(R_UB$Duration), mean)
+
+
+#Putting the numbers in one matrix
+total_eval <- data.frame(matrix(nrow = 10, ncol = 4))
+total_eval$X1 <- as.numeric(seq(1,10))
+total_eval$X2 <- as.numeric(R_agg$x)
+total_eval$X3 <- as.numeric(R_LB_agg$x)
+total_eval$X4 <- as.numeric(R_UB_agg$x)
+names(total_eval) <- c("Years", "R_mean", "R_LB", "R_UB")
+
+write.csv(total_eval, "One_year_50.csv")
+
+```
+
+```{r}
+
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+total_eval2$Group[1:10]<- "R mean"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- R_agg$x
+
+total_eval2$Group[11:20]<- "R LB"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- R_LB_agg$x
+
+total_eval2$Group[21:30]<- "R UB"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- R_UB_agg$x
+
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(0, 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("Fifty percent.jpeg")
+
+```
+
+
+
+#For 75
+
+```{r , include=FALSE}
+Clarke <- data.frame(matrix(nrow = 10000, ncol = 2))
+for(i in 1: 10000){
+
+  start_d <- sum(Cum_death75 < i/10000)
+  if (start_d>0){ 
+  Clarke[i,1] <- i/10000
+  Clarke[i,2] <- 
+  (i/10000 - Cum_death75[start_d])/(Cum_death75[start_d+1]-Cum_death75[start_d])*
+  (Time[start_d+1]-Time[start_d])+Time[start_d]
+  }
+  if (start_d == 0){
+  Clarke[i,1] <- i/10000
+  Clarke[i,2] <- 
+  (i/10000)/(Cum_death75[1])*(Time[1])
+  
+  }
+  
+}
+plot(Clarke[,2], 1-Clarke[,1])
+
+dist_Clarke <- Clarke[2,1] - Clarke[1,1]
+
+Clarke[,2]<-ifelse(is.na(Clarke[,2]), 1000, Clarke[,2])
+
+set.seed(100)
+Clarke <- rbind(c(0,0), Clarke)
+#For computational simplicity
+Clarke <- rbind(Clarke, c(1.1,1000))
+
+#Rivera paper 
+mean_HbA1c_effect <- -0.43
+SD_HbA1c_effect <- 0.17
+n_studies <- 19
+#number per arm -> we assume equal studies in sample size
+n_arm <- 7226/2
+tx <- c(rep(0, n_arm), rep(1, n_arm))
+
+#to have HR 0.8 as a mid point
+beta <- 1.18
+
+#evaluation from 1 to 10 years
+
+#dataset in which the results will be stored per duration
+sim_Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+names(sim_Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+
+a <- 
+  foreach(iteration = 1: n_iterations, .combine = 'c', .options.RNG=123, .packages= c("survival", "wCorr", "metafor", "boot")) %dorng% {
+#empty matrix in which the iterations results will be stored
+Overall_results <- data.frame(matrix(ncol = 4, nrow = 0))
+
+#creation of the survival percentages for the patients in the trials
+pat1_iteration <- runif(n_arm*n_studies)
+pat2_iteration <- runif(n_arm*n_studies)
+
+
+#evaluation from 1 to 10 year
+for (duration in 1:10){
+
+#empty dataset to store results in for the 10 durations
+results <- data.frame(matrix(ncol = 3, nrow = 0))
+
+#creating trials
+for (trial in 1: n_studies){
+
+#HbA1c effect from normal distribution
+HbA1c_effect <- rnorm(1, mean_HbA1c_effect, SD_HbA1c_effect)
+
+#Mapping from HbA1c to underlying HR 
+ln_HR <- HbA1c_effect*beta
+
+#creation of the survival percentages for the patients in the trial
+#for all durations we use the same patients set up, so that fluctuations
+#are solely due to duration and not due to sampling new patients
+pat1 <- pat1_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+pat2 <- pat2_iteration[c((1+(trial-1)*n_arm):(trial*n_arm))]
+
+#From percentage to time:
+elt_Clarke1 <- trunc(pat1/dist_Clarke)+1
+Time_pat1 <- (pat1-Clarke[elt_Clarke1,1])/dist_Clarke*
+  (Clarke[elt_Clarke1+1,2]-Clarke[elt_Clarke1,2])+Clarke[elt_Clarke1,2]
+
+#Active arm -> first % to control 
+pat2_1 <- 1- (1-pat2)^(exp(-ln_HR))
+elt_Clarke2 <- trunc(pat2_1/dist_Clarke)+1
+Time_pat2 <- (pat2_1-Clarke[elt_Clarke2,1])/dist_Clarke*
+  (Clarke[elt_Clarke2+1,2]-Clarke[elt_Clarke2,2])+Clarke[elt_Clarke2,2]
+
+#if Time_pat < duration then death, otherwise censoring at duration
+cens_pat1 <- ifelse(Time_pat1 < duration, 0, 1)
+cens_pat2 <- ifelse(Time_pat2 < duration, 0, 1)
+
+Time_pat1 <- ifelse(Time_pat1 < duration, Time_pat1, duration)
+Time_pat2 <- ifelse(Time_pat2 < duration, Time_pat2, duration)
+
+data_Cox <- data.frame(time = c(Time_pat1, Time_pat2), 
+                       cens = c(cens_pat1, cens_pat2), tx )  
+
+#causing program to stop when something wrong is happening
+if(min(data_Cox$time) < 0){
+  print("time below 0")
+  Problem
+  return()
+}
+
+a <- coxph(Surv(data_Cox$time, 1-data_Cox$cens) ~ tx)
+
+results <- rbind(results, c(HbA1c_effect, a$coefficients, a$var))
+}
+
+    #Correlation. We use Pearson here as prediction is important. 
+    #weighted for 1/var
+    names(results) <- c("surrogate", "target", "target_var")
+    
+    boot.func <- function(dat, indices) {
+      data1=dat[indices,]
+      
+      res <- weightedCorr(
+        data1$surrogate,
+        data1$target,
+        method = "Pearson",
+        weights = 1/data1$target_var,
+        ML = FALSE,
+        fast = TRUE
+      )
+    }
+    
+    res.boot <- boot(results, boot.func, R=10000)  
+    
+    #Storing into overall-results for duration
+    Overall_results <- rbind(Overall_results, 
+                             c(duration, median(res.boot$t),
+                               quantile(res.boot$t, 0.025),
+                               quantile(res.boot$t, 0.975)))
+    
+}
+
+#storing into data for the iterations
+names(Overall_results) <- c("Duration","R", "Lower bound", "Upper bound" )
+sim_Overall_results <- rbind(sim_Overall_results, Overall_results)
+
+return(list(Overall_results$Duration, Overall_results$R, Overall_results[,3], Overall_results[,4]))
+}
+
+R <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R) <- c("Duration", "R")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R <- a[[2+4*(i-1)]]
+  R <- rbind(R, temp1)  
+}
+R_agg <-aggregate(R$R, list(R$Duration), mean)
+
+#Lower bound and upper bound here taken as mean as it is over simulations
+
+R_LB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_LB) <- c("Duration", "R_LB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_LB <- a[[3+4*(i-1)]]
+  R_LB <- rbind(R_LB, temp1)  
+}
+R_LB_agg <- aggregate(R_LB$R_LB, list(R_LB$Duration), mean)
+
+R_UB <- data.frame(matrix(nrow = 0, ncol = 2))
+names(R_UB) <- c("Duration", "R_UB")
+for (i in 1: n_iterations){
+  temp1 <- data.frame(matrix(nrow = 10, ncol = 0))
+  temp1$Duration <- seq(1:10)
+  temp1$R_UB <- a[[4+4*(i-1)]]
+  R_UB <- rbind(R_UB, temp1)  
+}
+R_UB_agg <-aggregate(R_UB$R_UB, list(R_UB$Duration), mean)
+
+
+#Putting the numbers in one matrix
+total_eval <- data.frame(matrix(nrow = 10, ncol = 4))
+total_eval$X1 <- as.numeric(seq(1,10))
+total_eval$X2 <- as.numeric(R_agg$x)
+total_eval$X3 <- as.numeric(R_LB_agg$x)
+total_eval$X4 <- as.numeric(R_UB_agg$x)
+names(total_eval) <- c("Years", "R_mean", "R_LB", "R_UB")
+
+write.csv(total_eval, "One_year_75.csv")
+
+```
+
+```{r}
+
+total_eval2 <- data.frame(matrix(nrow = 30, ncol = 3))
+names(total_eval2) <- c("Group", "Duration", "Value")
+
+total_eval2$Group[1:10]<- "R mean"
+total_eval2$Duration[1:10]<- seq(1,10)
+total_eval2$Value[1:10]<- R_agg$x
+
+total_eval2$Group[11:20]<- "R LB"
+total_eval2$Duration[11:20]<- seq(1,10)
+total_eval2$Value[11:20]<- R_LB_agg$x
+
+total_eval2$Group[21:30]<- "R UB"
+total_eval2$Duration[21:30]<- seq(1,10)
+total_eval2$Value[21:30]<- R_UB_agg$x
+
+a <- ggplot(total_eval2
+, aes(Duration, Value,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,2,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red"))+
+    labs(title ="Correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(0, 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("Seventyfive percent.jpeg")
+
+```
+
+
+
+
+```{r}
+seventyfive <- read.csv( "One_year_75.csv")
+seventyfive$group <- "75%"
+
+fifty <- read.csv( "One_year_50.csv")
+fifty$group <- "50%"
+
+Twentyfive <- read.csv( "One_year25.csv")
+Twentyfive$group <- "25%"
+
+Ten <- read.csv( "One_year_10.csv")
+Ten$group <- "10%"
+
+basecase <- read.csv( "basecase1000.csv")
+basecase$group <- "basecase"
+
+plot_all <- rbind(
+   seventyfive, fifty, Twentyfive, Ten,basecase)
+
+plot_all$Group <- plot_all$group
+
+library(ggsci)
+
+a <- ggplot(plot_all
+, aes(Years, R_LB,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,.8,.8,.8,.8,.8,.8,.8,1,1,1))+
+#  scale_color_manual(values=scale_fill_lancet())+
+  scale_color_lancet() +
+    labs(title ="Correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("solid", "dashed", "dotted", "dotdash", "longdash", "twodash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c( 0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(0, 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("Baseperc LB.jpeg")
+
+
+
+a <- ggplot(plot_all
+, aes(Years, R_mean,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,.8,.8,.8,.8,.8,.8,.8,1,1,1))+
+#  scale_color_manual(values=scale_fill_lancet())+
+  scale_color_lancet() +
+    labs(title ="Correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("solid", "dashed", "dotted", "dotdash", "longdash", "twodash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c( 0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(0, 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("Baseperc mean.jpeg")
+
+
+```
+
+
+
+```{r}
+Weibull <- read.csv( "basecase1000_Weibull.csv")
+Weibull$group <- "Weibull"
+
+lognormal <- read.csv( "basecase1000_lnorm.csv")
+lognormal$group <- "log normal"
+
+llogis <- read.csv( "basecase1000_llogis.csv")
+llogis$group <- "Loglogistic"
+
+basecase <- read.csv( "basecase1000.csv")
+basecase$group <- "basecase"
+
+plot_all <- rbind(
+  Weibull, lognormal, llogis, basecase)
+
+plot_all$Group <- plot_all$group
+
+library(ggsci)
+
+
+a <- ggplot(plot_all
+, aes(Years, R_LB,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,.8,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red", "blue"))+
+    labs(title ="Mean lower bound correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(0, 0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(-.2, 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("Base_dist LB.jpeg")
+
+a <-ggplot(plot_all
+, aes(Years, R_mean,colour=Group, size = Group, type = Group)) + 
+  geom_line(aes(linetype=Group)) + 
+  scale_size_manual(values=c(.8, .8,.8,.8,.8,.8,.8,.8,.8,.8,1,1,1))+
+  scale_color_manual(values=c("darkgreen", "black", "red", "blue"))+
+    labs(title ="Mean correlation as function of trial duration")+
+  labs(x  = "Time (years)" ) +
+  scale_linetype_manual(values=c("dashed", "dotted", "twodash", "longdash", "solid", "longdash", "dashed", "solid", "solid", "solid", "dashed", "longdash", "longdash"))+
+  labs(y="Correlation")+
+  scale_x_continuous(breaks=c(0, 1,2,2.6,4,5,6,7,8,9,10))+
+  scale_y_continuous(breaks=c(0, 0, 0.25,0.45,0.75, 0.85, 1))+
+  coord_cartesian(expand = FALSE,ylim = c(0, 1), xlim = c(0, 10)) +
+  theme_bw()
+a+ theme(panel.grid.minor = element_blank())
+
+ggsave("Base_dist mean.jpeg")
+
+```
+
+
+
