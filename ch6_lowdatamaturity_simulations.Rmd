@@ -1,7 +1,5 @@
 ---
-title: "Surrogacy and follow-up paper analyses Clarke"
-author: "Mario Ouwens"
-date: "`r format(Sys.time(), '%d %B, %Y')`"
+title: "Chapter 6: Statistical Evaluation of Biomarkers as Surrogate Endpoints (Challenge of low data maturity)"
 output:
   pdf_document:
     toc: true
